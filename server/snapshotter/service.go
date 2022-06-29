@@ -107,6 +107,73 @@ func (s *Service) Close() error {
 	return nil
 }
 
+func (s *Service) Check(shardID uint64, interval int64) error {
+	data := s.MetaClient.Data()
+	_, _, si := data.ShardDBRetentionAndInfo(shardID)
+	nodeList := make([]uint64, 0)
+	//获取NodeID
+	for _, owner := range si.Owners {
+		nodeList = append(nodeList, owner.NodeID)
+	}
+	//获取node_address
+	nodeAddrList := make([]string, 0)
+	for _, nid := range nodeList {
+		nodeAddrList = append(nodeAddrList, data.DataNode(nid).Host)
+	}
+
+	for _, addr := range nodeAddrList {
+		conn, err := network.Dial("tcp", addr, MuxHeader)
+		if err != nil {
+			return err
+		}
+		defer conn.Close()
+
+		request := &Request{
+			Type:     RequestShardIntervalHash,
+			ShardID:  shardID,
+			Interval: interval,
+		}
+
+		_, err = conn.Write([]byte{byte(request.Type)})
+		if err != nil {
+			return err
+		}
+
+		// Write the request
+		if err := json.NewEncoder(conn).Encode(request); err != nil {
+			return fmt.Errorf("encode snapshot request: %s", err)
+		}
+
+		var r Response
+		// Read the response
+		if err := json.NewDecoder(conn).Decode(&r); err != nil {
+			return err
+		}
+
+	}
+	return nil
+}
+
+//func (s *Service) getNodeIdListByShardID(shardID uint64) []uint64 {
+//	data := s.MetaClient.Data()
+//	nodeIdList := make([]uint64, 0)
+//	for dbidx, dbi := range data.Databases {
+//		for rpidx, rpi := range dbi.RetentionPolicies {
+//			for sgidx, rg := range rpi.ShardGroups {
+//				for sidx, s := range rg.Shards {
+//					if s.ID == shardID {
+//						for _, nid := range data.Databases[dbidx].RetentionPolicies[rpidx].ShardGroups[sgidx].Shards[sidx].Owners {
+//							nodeIdList = append(nodeIdList, nid.NodeID)
+//						}
+//						return nodeIdList
+//					}
+//				}
+//			}
+//		}
+//	}
+//	return nil
+//}
+
 // WithLogger sets the logger on the service.
 func (s *Service) WithLogger(log *zap.Logger) {
 	s.Logger = log.With(zap.String("service", "snapshot"))
@@ -187,11 +254,17 @@ func (s *Service) handleConn(conn net.Conn) error {
 		return s.truncateShardGroups(conn, r.DelaySecond)
 	case RequestKillCopyShard:
 		return s.killCopyShard(conn, r.CopyShardDestHost, r.ShardID)
+	case RequestShardIntervalHash:
+		return s.getShardIntervalHash(conn, r.ShardID, r.Interval)
 	default:
 		return fmt.Errorf("snapshotter request type unknown: %v", r.Type)
 	}
 
 	return nil
+}
+
+func (s *Service) sendConn(conn net.Conn) {
+
 }
 
 func (s *Service) updateShardsLive(conn net.Conn) error {
@@ -623,6 +696,19 @@ func (s *Service) writeRetentionPolicyInfo(conn net.Conn, database, retentionPol
 	return nil
 }
 
+func (s *Service) getShardIntervalHash(conn net.Conn, shardID uint64, interval int64) error {
+	//res := Response{}
+	////获取shqrd段的hash值
+	//data := s.MetaClient.Data()
+	//shinfo := s.TSDBStore.Shard(shardID)
+	//
+	//if err := json.NewEncoder(conn).Encode(res); err != nil {
+	//	return fmt.Errorf("encode resonse: %s", err.Error())
+	//}
+	//
+	return nil
+}
+
 // readRequest unmarshals a request object from the conn.
 func (s *Service) readRequest(conn net.Conn) (Request, []byte, error) {
 	var r Request
@@ -699,6 +785,8 @@ const (
 	RequestCopyShardStatus
 	RequestKillCopyShard
 	RequestTruncateShards
+
+	RequestShardIntervalHash
 )
 
 // Request represents a request for a specific backup or for information
@@ -716,12 +804,14 @@ type Request struct {
 	ExportEnd              time.Time
 	UploadSize             int64
 	DelaySecond            int
+	Interval               int64
 }
 
 // Response contains the relative paths for all the shards on this server
 // that are in the requested database or retention policy.
 type Response struct {
 	Paths []string
+	Hash  []uint64
 }
 
 type CopyShardInfo struct {
