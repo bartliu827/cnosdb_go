@@ -10,6 +10,7 @@ import (
 	"encoding/json"
 	errors2 "errors"
 	"fmt"
+	"hash/fnv"
 	"io"
 	"io/ioutil"
 	"net"
@@ -54,6 +55,7 @@ type Service struct {
 		SetData(data *meta.Data) error
 		TruncateShardGroups(t time.Time) error
 		UpdateShardOwners(shardID uint64, addOwners []uint64, delOwners []uint64) error
+		ShardOwner(shardID uint64) (database, rp string, sgi *meta.ShardGroupInfo)
 	}
 
 	TSDBStore interface {
@@ -116,24 +118,59 @@ func (s *Service) Close() error {
 	return nil
 }
 
-func (s *Service) Check(shardID uint64, interval int64) error {
+// Check checks if the shards has the same value in different servers in a cluster.
+// return time slot (startTime,endTime) array that shard has diff values.
+func (s *Service) Check(shardID uint64, interval int64) ([][]int64, error) {
+	s.Logger.Info("1111")
 	data := s.MetaClient.Data()
 	_, _, si := data.ShardDBRetentionAndInfo(shardID)
 	nodeList := make([]uint64, 0)
-	//获取NodeID
+	//get NodeIDs
 	for _, owner := range si.Owners {
 		nodeList = append(nodeList, owner.NodeID)
 	}
-	//获取node_address
+	//get node_address
 	nodeAddrList := make([]string, 0)
 	for _, nid := range nodeList {
-		nodeAddrList = append(nodeAddrList, data.DataNode(nid).Host)
+		nodeAddrList = append(nodeAddrList, data.DataNode(nid).TCPHost)
 	}
+	//get shard startTime, endTime, and their hash values
+	localHash := make([]uint64, 0)
+	_, _, sg := s.MetaClient.ShardOwner(shardID)
+	start := sg.StartTime.UnixNano()
+	end := sg.EndTime.UnixNano()
 
+	s.Logger.Info(fmt.Sprintf("%d: %d", start, end))
+
+	s.Logger.Error("22222")
+
+	for i := start; i < end; i += interval {
+		//s.Logger.Info("33333")
+		//TODO: get data from shard
+		err := s.DumpShard2ProtocolLine(shardID, i, i+interval-1)
+		if err != nil {
+			return nil, err
+		}
+		//s.Logger.Info("44444")
+		d, err := ioutil.ReadFile("/Users/cnosdb/" + strconv.Itoa(int(shardID)) + ".txt")
+		if err != nil {
+			return nil, err
+		}
+		fnv64Hash := fnv.New64()
+		fnv64Hash.Write(d)
+		h := fnv64Hash.Sum64()
+		//s.Logger.Info("555555")
+		//s.Logger.Info("hash:" + strconv.FormatUint(h, 10))
+		localHash = append(localHash, h)
+	}
+	fmt.Printf("localhash:")
+	fmt.Println(localHash)
+
+	otherHashs := make(map[string][]uint64, 0)
 	for _, addr := range nodeAddrList {
 		conn, err := network.Dial("tcp", addr, MuxHeader)
 		if err != nil {
-			return err
+			return nil, err
 		}
 		defer conn.Close()
 
@@ -145,22 +182,38 @@ func (s *Service) Check(shardID uint64, interval int64) error {
 
 		_, err = conn.Write([]byte{byte(request.Type)})
 		if err != nil {
-			return err
+			return nil, err
 		}
 
 		// Write the request
 		if err := json.NewEncoder(conn).Encode(request); err != nil {
-			return fmt.Errorf("encode snapshot request: %s", err)
+			return nil, fmt.Errorf("encode snapshot request: %s", err)
 		}
 
-		var r Response
+		var resp Response
 		// Read the response
-		if err := json.NewDecoder(conn).Decode(&r); err != nil {
-			return err
+		if err := json.NewDecoder(conn).Decode(&resp); err != nil {
+			return nil, err
 		}
 
+		otherHashs[addr] = resp.Hash
 	}
-	return nil
+	fmt.Printf("others hash:")
+	fmt.Println(otherHashs)
+
+	result := make([][]int64, 0)
+	//validate the hash values, find out the diff, add the time duration into result
+	for idx, val := range localHash {
+		for _, v := range otherHashs {
+			if val != v[idx] {
+				st := start + int64(idx)*interval
+				et := st + interval
+				result = append(result, []int64{st, et})
+			}
+		}
+	}
+
+	return result, nil
 }
 
 //func (s *Service) getNodeIdListByShardID(shardID uint64) []uint64 {
@@ -435,6 +488,12 @@ func (s *Service) copyShardStatus(conn net.Conn) error {
 
 	infoJson, _ := json.Marshal(infos)
 	io.WriteString(conn, string(infoJson))
+	s.Logger.Error("111111")
+	_, err := s.Check(4, 86400000000000)
+	fmt.Println(err)
+	if err != nil {
+		return err
+	}
 	return nil
 }
 
@@ -705,15 +764,38 @@ func (s *Service) writeRetentionPolicyInfo(conn net.Conn, database, retentionPol
 }
 
 func (s *Service) getShardIntervalHash(conn net.Conn, shardID uint64, interval int64) error {
-	//res := Response{}
-	////获取shqrd段的hash值
+	s.Logger.Info("get the request msg")
+
+	res := Response{}
+	//获取shqrd段的hash值
 	//data := s.MetaClient.Data()
-	//shinfo := s.TSDBStore.Shard(shardID)
-	//
-	//if err := json.NewEncoder(conn).Encode(res); err != nil {
-	//	return fmt.Errorf("encode resonse: %s", err.Error())
-	//}
-	//
+
+	_, _, sg := s.MetaClient.ShardOwner(shardID)
+	start := sg.StartTime.UnixNano()
+	end := sg.EndTime.UnixNano()
+
+	for i := start; i < end; i += interval {
+		//TODO: get data from shard
+		err := s.DumpShard2ProtocolLine(shardID, i, i+interval-1)
+		if err != nil {
+			return err
+		}
+		data, err := ioutil.ReadFile("/Users/cnosdb/" + strconv.Itoa(int(shardID)) + ".txt")
+		if err != nil {
+			return err
+		}
+
+		fnv64Hash := fnv.New64()
+		fnv64Hash.Write(data)
+		h := fnv64Hash.Sum64()
+		res.Hash = append(res.Hash, h)
+	}
+	s.Logger.Info("return the hash value")
+	//s.Logger.Info(fmt.Sprint(res))
+	if err := json.NewEncoder(conn).Encode(res); err != nil {
+		return fmt.Errorf("encode resonse: %s", err.Error())
+	}
+
 	return nil
 }
 
@@ -846,11 +928,11 @@ type DumpShard struct {
 }
 
 func newDumpShard(shard *tsdb.Shard, relPath string, start, end int64) DumpShard {
-	out := shard.Path()[0 : len(shard.Path())-len(relPath)-5]
+	//out := shard.Path()[0 : len(shard.Path())-len(relPath)-5]
 	return DumpShard{
 		dataDir:   shard.Path(),
 		walDir:    shard.WalPath(),
-		out:       out + strconv.Itoa(int(shard.ID())) + ".txt",
+		out:       "/Users/cnosdb/" + strconv.Itoa(int(shard.ID())) + ".txt",
 		startTime: start,
 		endTime:   end,
 
