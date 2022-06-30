@@ -13,6 +13,7 @@ import (
 	"hash/fnv"
 	"io"
 	"io/ioutil"
+	"math/rand"
 	"net"
 	"os"
 	"path/filepath"
@@ -144,15 +145,16 @@ func (s *Service) Check(shardID uint64, interval int64) ([][]int64, error) {
 
 	s.Logger.Error("22222")
 
+	name := RandomString(4)
 	for i := start; i < end; i += interval {
 		//s.Logger.Info("33333")
 		//TODO: get data from shard
-		err := s.DumpShard2ProtocolLine(shardID, i, i+interval-1)
+		err := s.DumpShard2ProtocolLine(name, shardID, i, i+interval-1)
 		if err != nil {
 			return nil, err
 		}
 		//s.Logger.Info("44444")
-		d, err := ioutil.ReadFile("/Users/cnosdb/" + strconv.Itoa(int(shardID)) + ".txt")
+		d, err := ioutil.ReadFile("/Users/cnosdb/" + strconv.Itoa(int(shardID)) + name + ".txt")
 		if err != nil {
 			return nil, err
 		}
@@ -166,7 +168,7 @@ func (s *Service) Check(shardID uint64, interval int64) ([][]int64, error) {
 	fmt.Printf("localhash:")
 	fmt.Println(localHash)
 
-	otherHashs := make(map[string][]uint64, 0)
+	otherHashs := make([][]uint64, 0)
 	for _, addr := range nodeAddrList {
 		conn, err := network.Dial("tcp", addr, MuxHeader)
 		if err != nil {
@@ -196,22 +198,29 @@ func (s *Service) Check(shardID uint64, interval int64) ([][]int64, error) {
 			return nil, err
 		}
 
-		otherHashs[addr] = resp.Hash
+		otherHashs = append(otherHashs, resp.Hash)
 	}
 	fmt.Printf("others hash:")
 	fmt.Println(otherHashs)
 
 	result := make([][]int64, 0)
 	//validate the hash values, find out the diff, add the time duration into result
-	for idx, val := range localHash {
-		for _, v := range otherHashs {
-			if val != v[idx] {
-				st := start + int64(idx)*interval
+	if otherHashs == nil {
+		return nil, nil
+	}
+	for j := 0; j < len(otherHashs[0]); j++ {
+		tmp := otherHashs[0][j]
+		for i := 0; i < len(otherHashs); i++ {
+			if tmp != otherHashs[i][j] {
+				st := start + int64(j)*interval
 				et := st + interval
 				result = append(result, []int64{st, et})
+				continue
 			}
 		}
 	}
+	fmt.Printf("result")
+	fmt.Println(result)
 
 	return result, nil
 }
@@ -489,7 +498,7 @@ func (s *Service) copyShardStatus(conn net.Conn) error {
 	infoJson, _ := json.Marshal(infos)
 	io.WriteString(conn, string(infoJson))
 	s.Logger.Error("111111")
-	_, err := s.Check(4, 86400000000000)
+	_, err := s.Check(4, 86400000000000/2)
 	fmt.Println(err)
 	if err != nil {
 		return err
@@ -774,19 +783,20 @@ func (s *Service) getShardIntervalHash(conn net.Conn, shardID uint64, interval i
 	start := sg.StartTime.UnixNano()
 	end := sg.EndTime.UnixNano()
 
+	name := RandomString(4)
 	for i := start; i < end; i += interval {
 		//TODO: get data from shard
-		err := s.DumpShard2ProtocolLine(shardID, i, i+interval-1)
+		err := s.DumpShard2ProtocolLine(name, shardID, i, i+interval-1)
 		if err != nil {
 			return err
 		}
-		data, err := ioutil.ReadFile("/Users/cnosdb/" + strconv.Itoa(int(shardID)) + ".txt")
+		d, err := ioutil.ReadFile("/Users/cnosdb/" + strconv.Itoa(int(shardID)) + name + ".txt")
 		if err != nil {
 			return err
 		}
 
 		fnv64Hash := fnv.New64()
-		fnv64Hash.Write(data)
+		fnv64Hash.Write(d)
 		h := fnv64Hash.Sum64()
 		res.Hash = append(res.Hash, h)
 	}
@@ -927,12 +937,12 @@ type DumpShard struct {
 	walFiles []string
 }
 
-func newDumpShard(shard *tsdb.Shard, relPath string, start, end int64) DumpShard {
+func newDumpShard(fnPre string, shard *tsdb.Shard, relPath string, start, end int64) DumpShard {
 	//out := shard.Path()[0 : len(shard.Path())-len(relPath)-5]
 	return DumpShard{
 		dataDir:   shard.Path(),
 		walDir:    shard.WalPath(),
-		out:       "/Users/cnosdb/" + strconv.Itoa(int(shard.ID())) + ".txt",
+		out:       "/Users/cnosdb/" + strconv.Itoa(int(shard.ID())) + fnPre + ".txt",
 		startTime: start,
 		endTime:   end,
 
@@ -941,7 +951,27 @@ func newDumpShard(shard *tsdb.Shard, relPath string, start, end int64) DumpShard
 	}
 }
 
-func (s *Service) DumpShard2ProtocolLine(shardID uint64, start, end int64) error {
+var defaultLetters = []rune("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789")
+
+// RandomString returns a random string with a fixed length
+func RandomString(n int, allowedChars ...[]rune) string {
+	var letters []rune
+
+	if len(allowedChars) == 0 {
+		letters = defaultLetters
+	} else {
+		letters = allowedChars[0]
+	}
+
+	b := make([]rune, n)
+	for i := range b {
+		b[i] = letters[rand.Intn(len(letters))]
+	}
+
+	return string(b)
+}
+
+func (s *Service) DumpShard2ProtocolLine(fnPre string, shardID uint64, start, end int64) error {
 	shard := s.TSDBStore.Shard(shardID)
 	if shard == nil {
 		return errors2.New("the shard isn't exist")
@@ -951,15 +981,15 @@ func (s *Service) DumpShard2ProtocolLine(shardID uint64, start, end int64) error
 		return err
 	}
 
-	dumpShard := newDumpShard(shard, p, start, end)
-	s.Logger.Info("NewDumpShard", zap.String("dataDir", dumpShard.dataDir), zap.String("walDir", dumpShard.walDir), zap.String("out", dumpShard.out))
+	dumpShard := newDumpShard(fnPre, shard, p, start, end)
+	//s.Logger.Info("NewDumpShard", zap.String("dataDir", dumpShard.dataDir), zap.String("walDir", dumpShard.walDir), zap.String("out", dumpShard.out))
 	if err := dumpShard.walkTSMFiles(); err != nil {
 		return err
 	}
 	if err := dumpShard.walkWALFiles(); err != nil {
 		return err
 	}
-	s.Logger.Info("walkFiles", zap.Any("manifest", dumpShard.manifest), zap.Any("TSM", dumpShard.tsmFiles), zap.Any("WAL", dumpShard.walFiles))
+	//s.Logger.Info("walkFiles", zap.Any("manifest", dumpShard.manifest), zap.Any("TSM", dumpShard.tsmFiles), zap.Any("WAL", dumpShard.walFiles))
 	return dumpShard.write()
 }
 
