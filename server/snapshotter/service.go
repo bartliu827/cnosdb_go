@@ -122,7 +122,7 @@ func (s *Service) Close() error {
 // Check checks if the shards has the same value in different servers in a cluster.
 // return time slot (startTime,endTime) array that shard has diff values.
 func (s *Service) Check(shardID uint64, interval int64) ([][]int64, error) {
-	s.Logger.Info("1111")
+	//s.Logger.Info("1111")
 	data := s.MetaClient.Data()
 	_, _, si := data.ShardDBRetentionAndInfo(shardID)
 	nodeList := make([]uint64, 0)
@@ -136,37 +136,37 @@ func (s *Service) Check(shardID uint64, interval int64) ([][]int64, error) {
 		nodeAddrList = append(nodeAddrList, data.DataNode(nid).TCPHost)
 	}
 	//get shard startTime, endTime, and their hash values
-	localHash := make([]uint64, 0)
+	//localHash := make([]uint64, 0)
 	_, _, sg := s.MetaClient.ShardOwner(shardID)
 	start := sg.StartTime.UnixNano()
 	end := sg.EndTime.UnixNano()
 
 	s.Logger.Info(fmt.Sprintf("%d: %d", start, end))
 
-	s.Logger.Error("22222")
+	//s.Logger.Error("22222")
 
-	name := RandomString(4)
-	for i := start; i < end; i += interval {
-		//s.Logger.Info("33333")
-		//TODO: get data from shard
-		err := s.DumpShard2ProtocolLine(name, shardID, i, i+interval-1)
-		if err != nil {
-			return nil, err
-		}
-		//s.Logger.Info("44444")
-		d, err := ioutil.ReadFile("/Users/cnosdb/" + strconv.Itoa(int(shardID)) + name + ".txt")
-		if err != nil {
-			return nil, err
-		}
-		fnv64Hash := fnv.New64()
-		fnv64Hash.Write(d)
-		h := fnv64Hash.Sum64()
-		//s.Logger.Info("555555")
-		//s.Logger.Info("hash:" + strconv.FormatUint(h, 10))
-		localHash = append(localHash, h)
-	}
-	fmt.Printf("localhash:")
-	fmt.Println(localHash)
+	//name := RandomString(4)
+	//for i := start; i < end; i += interval {
+	//	//s.Logger.Info("33333")
+	//	//TODO: get data from shard
+	//	err := s.DumpShard2ProtocolLine(name, shardID, i, i+interval-1)
+	//	if err != nil {
+	//		return nil, err
+	//	}
+	//	//s.Logger.Info("44444")
+	//	d, err := ioutil.ReadFile("/Users/cnosdb/" + strconv.Itoa(int(shardID)) + name + ".txt")
+	//	if err != nil {
+	//		return nil, err
+	//	}
+	//	fnv64Hash := fnv.New64()
+	//	fnv64Hash.Write(d)
+	//	h := fnv64Hash.Sum64()
+	//	//s.Logger.Info("555555")
+	//	//s.Logger.Info("hash:" + strconv.FormatUint(h, 10))
+	//	localHash = append(localHash, h)
+	//}
+	//fmt.Printf("localhash:")
+	//fmt.Println(localHash)
 
 	otherHashs := make([][]uint64, 0)
 	for _, addr := range nodeAddrList {
@@ -499,8 +499,9 @@ func (s *Service) copyShardStatus(conn net.Conn) error {
 	io.WriteString(conn, string(infoJson))
 	s.Logger.Error("111111")
 	_, err := s.Check(4, 86400000000000/2)
-	fmt.Println(err)
+
 	if err != nil {
+		fmt.Println(err)
 		return err
 	}
 	return nil
