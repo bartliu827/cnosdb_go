@@ -8,10 +8,8 @@ import (
 	"encoding/binary"
 	"encoding/json"
 	"fmt"
-	"hash/fnv"
 	"io"
 	"io/ioutil"
-	"math/rand"
 	"net"
 	"strings"
 	"sync"
@@ -135,30 +133,7 @@ func (s *Service) Check(shardID uint64, interval int64) ([][]int64, error) {
 
 	//s.Logger.Error("22222")
 
-	//name := RandomString(4)
-	//for i := start; i < end; i += interval {
-	//	//s.Logger.Info("33333")
-	//	//TODO: get data from shard
-	//	err := s.DumpShard2ProtocolLine(name, shardID, i, i+interval-1)
-	//	if err != nil {
-	//		return nil, err
-	//	}
-	//	//s.Logger.Info("44444")
-	//	d, err := ioutil.ReadFile("/Users/cnosdb/" + strconv.Itoa(int(shardID)) + name + ".txt")
-	//	if err != nil {
-	//		return nil, err
-	//	}
-	//	fnv64Hash := fnv.New64()
-	//	fnv64Hash.Write(d)
-	//	h := fnv64Hash.Sum64()
-	//	//s.Logger.Info("555555")
-	//	//s.Logger.Info("hash:" + strconv.FormatUint(h, 10))
-	//	localHash = append(localHash, h)
-	//}
-	//fmt.Printf("localhash:")
-	//fmt.Println(localHash)
-
-	otherHashs := make([][]uint64, 0)
+	hashs := make([][]uint64, 0)
 	for _, addr := range nodeAddrList {
 		conn, err := network.Dial("tcp", addr, MuxHeader)
 		if err != nil {
@@ -188,20 +163,20 @@ func (s *Service) Check(shardID uint64, interval int64) ([][]int64, error) {
 			return nil, err
 		}
 
-		otherHashs = append(otherHashs, resp.Hash)
+		hashs = append(hashs, resp.Hash)
 	}
-	fmt.Printf("others hash:")
-	fmt.Println(otherHashs)
+	fmt.Printf("hashs:")
+	fmt.Println(hashs)
 
 	result := make([][]int64, 0)
 	//validate the hash values, find out the diff, add the time duration into result
-	if otherHashs == nil {
+	if hashs == nil {
 		return nil, nil
 	}
-	for j := 0; j < len(otherHashs[0]); j++ {
-		tmp := otherHashs[0][j]
-		for i := 0; i < len(otherHashs); i++ {
-			if tmp != otherHashs[i][j] {
+	for j := 0; j < len(hashs[0]); j++ {
+		tmp := hashs[0][j]
+		for i := 0; i < len(hashs); i++ {
+			if tmp != hashs[i][j] {
 				st := start + int64(j)*interval
 				et := st + interval
 				result = append(result, []int64{st, et})
@@ -214,26 +189,6 @@ func (s *Service) Check(shardID uint64, interval int64) ([][]int64, error) {
 
 	return result, nil
 }
-
-//func (s *Service) getNodeIdListByShardID(shardID uint64) []uint64 {
-//	data := s.MetaClient.Data()
-//	nodeIdList := make([]uint64, 0)
-//	for dbidx, dbi := range data.Databases {
-//		for rpidx, rpi := range dbi.RetentionPolicies {
-//			for sgidx, rg := range rpi.ShardGroups {
-//				for sidx, s := range rg.Shards {
-//					if s.ID == shardID {
-//						for _, nid := range data.Databases[dbidx].RetentionPolicies[rpidx].ShardGroups[sgidx].Shards[sidx].Owners {
-//							nodeIdList = append(nodeIdList, nid.NodeID)
-//						}
-//						return nodeIdList
-//					}
-//				}
-//			}
-//		}
-//	}
-//	return nil
-//}
 
 // WithLogger sets the logger on the service.
 func (s *Service) WithLogger(log *zap.Logger) {
@@ -763,22 +718,14 @@ func (s *Service) getShardIntervalHash(conn net.Conn, shardID uint64, interval i
 	start := sg.StartTime.UnixNano()
 	end := sg.EndTime.UnixNano()
 
-	name := RandomString(4)
+	//name := RandomString(4)
 	for i := start; i < end; i += interval {
-		//TODO: get data from shard
-		err := s.DumpShard2ProtocolLine(name, shardID, i, i+interval-1)
-		if err != nil {
-			return err
-		}
-		d, err := ioutil.ReadFile("/Users/cnosdb/" + strconv.Itoa(int(shardID)) + name + ".txt")
-		if err != nil {
-			return err
-		}
+		//TODO: get data from shard and compute their hash value
 
-		fnv64Hash := fnv.New64()
-		fnv64Hash.Write(d)
-		h := fnv64Hash.Sum64()
-		res.Hash = append(res.Hash, h)
+		//fnv64Hash := fnv.New64()
+		//fnv64Hash.Write(d)
+		//h := fnv64Hash.Sum64()
+		//res.Hash = append(res.Hash, h)
 	}
 	s.Logger.Info("return the hash value")
 	//s.Logger.Info(fmt.Sprint(res))
