@@ -10,6 +10,7 @@ import (
 	"sync"
 
 	"github.com/cnosdb/cnosdb/meta"
+	"github.com/cnosdb/cnosdb/vend/db/models"
 	"github.com/cnosdb/cnosdb/vend/db/tsdb"
 	"go.uber.org/zap"
 )
@@ -25,6 +26,10 @@ type Service struct {
 
 	Node *meta.Node
 
+	ShardWriter interface {
+		WriteShard(shardID, ownerID uint64, points []models.Point) error
+	}
+
 	MetaClient interface {
 		encoding.BinaryMarshaler
 		Data() meta.Data
@@ -32,6 +37,7 @@ type Service struct {
 	}
 
 	TSDBStore interface {
+		WriteToShard(shardID uint64, points []models.Point) error
 		ScanFiledValue(shardID uint64, key string, start, end int64, fn tsdb.ScanFiledFunc) error
 	}
 
@@ -116,6 +122,14 @@ func (s *Service) handleConn(conn net.Conn) error {
 	}
 
 	return nil
+}
+
+func (s *Service) WriteShard(shardID, ownerID uint64, points []models.Point) error {
+	if ownerID != s.Node.ID {
+		return s.WriteShard(shardID, ownerID, points)
+	} else {
+		return s.TSDBStore.WriteToShard(shardID, points)
+	}
 }
 
 // RequestType indicates the typeof ae request.

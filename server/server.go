@@ -305,6 +305,7 @@ func (s *Server) initTSDBStore() error {
 	s.antiEntropyService.WithLogger(s.Logger)
 	s.antiEntropyService.TSDBStore = s.TSDBStore
 	s.antiEntropyService.MetaClient = s.MetaClient
+	s.antiEntropyService.ShardWriter = s.shardWriter
 	s.antiEntropyService.Node = s.Node
 
 	// Open TSDB store.
