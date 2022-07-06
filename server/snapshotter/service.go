@@ -109,86 +109,6 @@ func (s *Service) Close() error {
 
 // Check checks if the shards has the same value in different servers in a cluster.
 // return time slot (startTime,endTime) array that shard has diff values.
-func (s *Service) Check(shardID uint64, interval int64) ([][]int64, error) {
-	//s.Logger.Info("1111")
-	data := s.MetaClient.Data()
-	_, _, si := data.ShardDBRetentionAndInfo(shardID)
-	nodeList := make([]uint64, 0)
-	//get NodeIDs
-	for _, owner := range si.Owners {
-		nodeList = append(nodeList, owner.NodeID)
-	}
-	//get node_address
-	nodeAddrList := make([]string, 0)
-	for _, nid := range nodeList {
-		nodeAddrList = append(nodeAddrList, data.DataNode(nid).TCPHost)
-	}
-	//get shard startTime, endTime, and their hash values
-	//localHash := make([]uint64, 0)
-	_, _, sg := s.MetaClient.ShardOwner(shardID)
-	start := sg.StartTime.UnixNano()
-	end := sg.EndTime.UnixNano()
-
-	s.Logger.Info(fmt.Sprintf("%d: %d", start, end))
-
-	//s.Logger.Error("22222")
-
-	hashs := make([][]uint64, 0)
-	for _, addr := range nodeAddrList {
-		conn, err := network.Dial("tcp", addr, MuxHeader)
-		if err != nil {
-			return nil, err
-		}
-		defer conn.Close()
-
-		request := &Request{
-			Type:     RequestShardIntervalHash,
-			ShardID:  shardID,
-			Interval: interval,
-		}
-
-		_, err = conn.Write([]byte{byte(request.Type)})
-		if err != nil {
-			return nil, err
-		}
-
-		// Write the request
-		if err := json.NewEncoder(conn).Encode(request); err != nil {
-			return nil, fmt.Errorf("encode snapshot request: %s", err)
-		}
-
-		var resp Response
-		// Read the response
-		if err := json.NewDecoder(conn).Decode(&resp); err != nil {
-			return nil, err
-		}
-
-		hashs = append(hashs, resp.Hash)
-	}
-	fmt.Printf("hashs:")
-	fmt.Println(hashs)
-
-	result := make([][]int64, 0)
-	//validate the hash values, find out the diff, add the time duration into result
-	if hashs == nil {
-		return nil, nil
-	}
-	for j := 0; j < len(hashs[0]); j++ {
-		tmp := hashs[0][j]
-		for i := 0; i < len(hashs); i++ {
-			if tmp != hashs[i][j] {
-				st := start + int64(j)*interval
-				et := st + interval
-				result = append(result, []int64{st, et})
-				continue
-			}
-		}
-	}
-	fmt.Printf("result")
-	fmt.Println(result)
-
-	return result, nil
-}
 
 // WithLogger sets the logger on the service.
 func (s *Service) WithLogger(log *zap.Logger) {
@@ -270,8 +190,6 @@ func (s *Service) handleConn(conn net.Conn) error {
 		return s.truncateShardGroups(conn, r.DelaySecond)
 	case RequestKillCopyShard:
 		return s.killCopyShard(conn, r.CopyShardDestHost, r.ShardID)
-	case RequestShardIntervalHash:
-		return s.getShardIntervalHash(conn, r.ShardID, r.Interval)
 	default:
 		return fmt.Errorf("snapshotter request type unknown: %v", r.Type)
 	}
@@ -707,35 +625,6 @@ func (s *Service) writeRetentionPolicyInfo(conn net.Conn, database, retentionPol
 	return nil
 }
 
-func (s *Service) getShardIntervalHash(conn net.Conn, shardID uint64, interval int64) error {
-	s.Logger.Info("get the request msg")
-
-	res := Response{}
-	//获取shqrd段的hash值
-	//data := s.MetaClient.Data()
-
-	_, _, sg := s.MetaClient.ShardOwner(shardID)
-	start := sg.StartTime.UnixNano()
-	end := sg.EndTime.UnixNano()
-
-	//name := RandomString(4)
-	for i := start; i < end; i += interval {
-		//TODO: get data from shard and compute their hash value
-
-		//fnv64Hash := fnv.New64()
-		//fnv64Hash.Write(d)
-		//h := fnv64Hash.Sum64()
-		//res.Hash = append(res.Hash, h)
-	}
-	s.Logger.Info("return the hash value")
-	//s.Logger.Info(fmt.Sprint(res))
-	if err := json.NewEncoder(conn).Encode(res); err != nil {
-		return fmt.Errorf("encode resonse: %s", err.Error())
-	}
-
-	return nil
-}
-
 // readRequest unmarshals a request object from the conn.
 func (s *Service) readRequest(conn net.Conn) (Request, []byte, error) {
 	var r Request
@@ -812,8 +701,6 @@ const (
 	RequestCopyShardStatus
 	RequestKillCopyShard
 	RequestTruncateShards
-
-	RequestShardIntervalHash
 )
 
 // Request represents a request for a specific backup or for information
