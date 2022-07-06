@@ -44,6 +44,7 @@ type Service struct {
 		SetData(data *meta.Data) error
 		TruncateShardGroups(t time.Time) error
 		UpdateShardOwners(shardID uint64, addOwners []uint64, delOwners []uint64) error
+		ShardOwner(shardID uint64) (database, rp string, sgi *meta.ShardGroupInfo)
 	}
 
 	TSDBStore interface {
@@ -105,6 +106,9 @@ func (s *Service) Close() error {
 	s.wg.Wait()
 	return nil
 }
+
+// Check checks if the shards has the same value in different servers in a cluster.
+// return time slot (startTime,endTime) array that shard has diff values.
 
 // WithLogger sets the logger on the service.
 func (s *Service) WithLogger(log *zap.Logger) {
@@ -714,12 +718,14 @@ type Request struct {
 	ExportEnd              time.Time
 	UploadSize             int64
 	DelaySecond            int
+	Interval               int64
 }
 
 // Response contains the relative paths for all the shards on this server
 // that are in the requested database or retention policy.
 type Response struct {
 	Paths []string
+	Hash  []uint64
 }
 
 type CopyShardInfo struct {
