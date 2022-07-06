@@ -78,7 +78,7 @@ func (s *Service) WithLogger(log *zap.Logger) {
 	s.Logger = log.With(zap.String("service", "ae"))
 }
 
-// serve serves snapshot requests from the listener.
+// serve serves ae requests from the listener.
 func (s *Service) serve() {
 	defer s.wg.Done()
 
@@ -125,6 +125,30 @@ func (s *Service) handleConn(conn net.Conn) error {
 	return nil
 }
 
+func (s *Service) routineLoop() {
+	//s.inspection(123)
+}
+
+func (s *Service) inspection(shardId uint64) {
+	//s.shardDigest()
+	//findInconsistentRange()
+	//s.dumpFieldValues()
+	//s.findLostFieldValues()
+	//s.WriteShard()
+}
+
+func (s *Service) shardDigest(shardId uint64, start, end, interval int64, addr string) {
+}
+
+func (s *Service) dumpFieldValues(key string, shardId uint64, start, end, addr string) {
+}
+
+func (s *Service) findInconsistentRange() {
+}
+
+func (s *Service) findLostFieldValues() {
+}
+
 func (s *Service) WriteShard(shardID, ownerID uint64, points []models.Point) error {
 	if ownerID != s.Node.ID {
 		return s.WriteShard(shardID, ownerID, points)
@@ -151,6 +175,12 @@ type RequestType uint8
 const (
 	Requestxxxxxxx RequestType = iota
 )
+
+type FieldRangeDigest struct {
+	StartTime int64
+	EndTime   int64
+	Digest    string
+}
 
 type ShardDigestRequest struct {
 	Type      RequestType
