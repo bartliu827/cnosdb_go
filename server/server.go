@@ -20,6 +20,7 @@ import (
 	"github.com/cnosdb/cnosdb/pkg/logger"
 	"github.com/cnosdb/cnosdb/pkg/network"
 	"github.com/cnosdb/cnosdb/pkg/utils"
+	"github.com/cnosdb/cnosdb/server/ae"
 	"github.com/cnosdb/cnosdb/server/continuous_querier"
 	"github.com/cnosdb/cnosdb/server/coordinator"
 	"github.com/cnosdb/cnosdb/server/hh"
@@ -78,6 +79,8 @@ type Server struct {
 
 	coordinatorService *coordinator.Service
 	snapshotterService *snapshotter.Service
+
+	antiEntropyService *ae.Service
 
 	//this field is nil.We don't append services to it.
 	services []interface {
@@ -298,6 +301,13 @@ func (s *Server) initTSDBStore() error {
 	s.snapshotterService.MetaClient = s.MetaClient
 	s.snapshotterService.Node = s.Node
 
+	s.antiEntropyService = ae.NewService()
+	s.antiEntropyService.WithLogger(s.Logger)
+	s.antiEntropyService.TSDBStore = s.TSDBStore
+	s.antiEntropyService.MetaClient = s.MetaClient
+	s.antiEntropyService.ShardWriter = s.shardWriter
+	s.antiEntropyService.Node = s.Node
+
 	// Open TSDB store.
 	if err := s.TSDBStore.Open(); err != nil {
 		return fmt.Errorf("open tsdb store: %s", err)
@@ -382,6 +392,11 @@ func (s *Server) openServices() error {
 	s.snapshotterService.Listener = network.ListenString(s.tcpMux, snapshotter.MuxHeader)
 	if err := s.snapshotterService.Open(); err != nil {
 		return fmt.Errorf("open snapshotter service: %s", err)
+	}
+
+	s.antiEntropyService.Listener = network.ListenString(s.tcpMux, ae.MuxHeader)
+	if err := s.antiEntropyService.Open(); err != nil {
+		return fmt.Errorf("open ae service: %s", err)
 	}
 
 	if err := s.continuousQuerierService.Open(); err != nil {
