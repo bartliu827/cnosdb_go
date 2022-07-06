@@ -3,7 +3,9 @@ package ae
 
 import (
 	"encoding"
+	"encoding/json"
 	"fmt"
+	"github.com/cnosdb/cnosdb/pkg/network"
 	"io"
 	"net"
 	"strings"
@@ -34,6 +36,7 @@ type Service struct {
 		encoding.BinaryMarshaler
 		Data() meta.Data
 		SetData(data *meta.Data) error
+		ShardOwner(shardID uint64) (database, rp string, sgi *meta.ShardGroupInfo)
 	}
 
 	TSDBStore interface {
@@ -75,6 +78,87 @@ func (s *Service) Close() error {
 // WithLogger sets the logger on the service.
 func (s *Service) WithLogger(log *zap.Logger) {
 	s.Logger = log.With(zap.String("service", "ae"))
+}
+
+func (s *Service) Check(shardID uint64, interval int64) ([][]int64, error) {
+	//s.Logger.Info("1111")
+	data := s.MetaClient.Data()
+	_, _, si := data.ShardDBRetentionAndInfo(shardID)
+	nodeList := make([]uint64, 0)
+	//get NodeIDs
+	for _, owner := range si.Owners {
+		nodeList = append(nodeList, owner.NodeID)
+	}
+	//get node_address
+	nodeAddrList := make([]string, 0)
+	for _, nid := range nodeList {
+		nodeAddrList = append(nodeAddrList, data.DataNode(nid).TCPHost)
+	}
+	//get shard startTime, endTime, and their hash values
+	//localHash := make([]uint64, 0)
+	_, _, sg := s.MetaClient.ShardOwner(shardID)
+	start := sg.StartTime.UnixNano()
+	end := sg.EndTime.UnixNano()
+
+	s.Logger.Info(fmt.Sprintf("%d: %d", start, end))
+
+	//s.Logger.Error("22222")
+
+	hashs := make([][]int64, 0)
+	for _, addr := range nodeAddrList {
+		conn, err := network.Dial("tcp", addr, MuxHeader)
+		if err != nil {
+			return nil, err
+		}
+		defer conn.Close()
+
+		request := &ShardDigestRequest{
+			Type:     RequestShardIntervalHash,
+			ShardID:  shardID,
+			Interval: interval,
+		}
+
+		_, err = conn.Write([]byte{byte(request.Type)})
+		if err != nil {
+			return nil, err
+		}
+
+		// Write the request
+		if err := json.NewEncoder(conn).Encode(request); err != nil {
+			return nil, fmt.Errorf("encode snapshot request: %s", err)
+		}
+
+		var resp ShardDigestResponse
+		// Read the response
+		if err := json.NewDecoder(conn).Decode(&resp); err != nil {
+			return nil, err
+		}
+
+		hashs = append(hashs, resp.Hash)
+	}
+	fmt.Printf("hashs:")
+	fmt.Println(hashs)
+
+	result := make([][]int64, 0)
+	//validate the hash values, find out the diff, add the time duration into result
+	if hashs == nil {
+		return nil, nil
+	}
+	for j := 0; j < len(hashs[0]); j++ {
+		tmp := hashs[0][j]
+		for i := 0; i < len(hashs); i++ {
+			if tmp != hashs[i][j] {
+				st := start + int64(j)*interval
+				et := st + interval
+				result = append(result, []int64{st, et})
+				continue
+			}
+		}
+	}
+	fmt.Printf("result")
+	fmt.Println(result)
+
+	return result, nil
 }
 
 // serve serves snapshot requests from the listener.
@@ -132,11 +216,43 @@ func (s *Service) WriteShard(shardID, ownerID uint64, points []models.Point) err
 	}
 }
 
+func (s *Service) getShardIntervalHash(conn net.Conn, shardID uint64, interval int64) error {
+	s.Logger.Info("get the request msg")
+
+	resp := ShardDigestResponse{}
+	//获取shqrd段的hash值
+	//data := s.MetaClient.Data()
+
+	_, _, sg := s.MetaClient.ShardOwner(shardID)
+	start := sg.StartTime.UnixNano()
+	end := sg.EndTime.UnixNano()
+
+	//name := RandomString(4)
+	//var resultSet map[string][]int64
+	for i := start; i < end; i += interval {
+		//TODO: get data from shard and compute their hash value
+
+		//fnv64Hash := fnv.New64()
+		//fnv64Hash.Write(d)
+		//h := fnv64Hash.Sum64()
+		//res.Hash = append(res.Hash, h)
+	}
+	s.Logger.Info("return the hash value")
+	//s.Logger.Info(fmt.Sprint(res))
+	if err := json.NewEncoder(conn).Encode(resp); err != nil {
+		return fmt.Errorf("encode resonse: %s", err.Error())
+	}
+
+	return nil
+}
+
 // RequestType indicates the typeof ae request.
 type RequestType uint8
 
 const (
 	Requestxxxxxxx RequestType = iota
+
+	RequestShardIntervalHash
 )
 
 type ShardDigestRequest struct {
@@ -148,6 +264,7 @@ type ShardDigestRequest struct {
 }
 
 type ShardDigestResponse struct {
+	Hash []int64
 }
 
 type DumpFieldValuesRequest struct {
