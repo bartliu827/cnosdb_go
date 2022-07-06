@@ -8,6 +8,7 @@ import (
 	"github.com/cnosdb/cnosdb/pkg/network"
 	"io"
 	"net"
+	"os"
 	"strings"
 	"sync"
 
@@ -133,6 +134,18 @@ func (s *Service) WriteShard(shardID, ownerID uint64, points []models.Point) err
 	} else {
 		return s.TSDBStore.WriteToShard(shardID, points)
 	}
+}
+
+func (s *Service) digest_example() {
+	//air,host=h1,station=XiaoMaiDao#~#visibility
+	file, _ := os.Create("./scan_field")
+	defer file.Close()
+	s.TSDBStore.ScanFiledValue(36, "", 1555144313000000000, 1755144315000000000,
+		func(key string, ts int64, val interface{}) error {
+			file.WriteString(fmt.Sprintf("%s %d %v\n", key, ts, val))
+			//fmt.Printf("========ScanFiledValue %s %d %v\n", key, ts, val)
+			return nil
+		})
 }
 
 // RequestType indicates the typeof ae request.
