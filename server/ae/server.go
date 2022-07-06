@@ -3,7 +3,9 @@ package ae
 
 import (
 	"encoding"
+	"encoding/json"
 	"fmt"
+	"github.com/cnosdb/cnosdb/pkg/network"
 	"io"
 	"net"
 	"strings"
@@ -37,6 +39,7 @@ type Service struct {
 	}
 
 	TSDBStore interface {
+		Shard(id uint64) *tsdb.Shard
 		WriteToShard(shardID uint64, points []models.Point) error
 		ScanFiledValue(shardID uint64, key string, start, end int64, fn tsdb.ScanFiledFunc) error
 	}
@@ -137,6 +140,8 @@ type RequestType uint8
 
 const (
 	Requestxxxxxxx RequestType = iota
+
+	RequestGetDiffData
 )
 
 type ShardDigestRequest struct {
@@ -159,4 +164,84 @@ type DumpFieldValuesRequest struct {
 }
 
 type DumpFieldValuesResponse struct {
+}
+
+func (s *Service) getDataByTime(conn net.Conn, key string, shardID uint64, start, end int64) error {
+
+	res := DumpFieldValuesResponse{}
+	shard := s.TSDBStore.Shard(shardID)
+	//file, err := os.Create("./diffData")
+	//if err != nil {
+	//	return err
+	//}
+	//defer file.Close()
+	//bw := bufio.NewWriterSize(file, 1024*1024)
+	//defer bw.Flush()
+	//var w io.Writer = bw
+
+	var fn func(key string, ts int64, val interface{}) error
+	fn = func(key string, ts int64, val interface{}) error {
+		//if _, err := w.Write([]byte(fmt.Sprintf("%v", val))); err != nil {
+		//	return err
+		//}
+		return nil
+	}
+
+	if err := shard.ScanFiledValue(key, start, end, fn); err != nil {
+		return err
+	}
+
+	if err := json.NewEncoder(conn).Encode(res); err != nil {
+		return fmt.Errorf("encode resonse: %s", err.Error())
+	}
+
+	return nil
+}
+
+func (s *Service) GetDiffData(shardID uint64, key string, startTime, endTime int64) error {
+	data := s.MetaClient.Data()
+	_, _, si := data.ShardDBRetentionAndInfo(shardID)
+	nodeList := make([]uint64, 0)
+	//get NodeIDs
+	for _, owner := range si.Owners {
+		nodeList = append(nodeList, owner.NodeID)
+	}
+	//get node_address
+	nodeAddrList := make([]string, 0)
+	for _, nid := range nodeList {
+		nodeAddrList = append(nodeAddrList, data.DataNode(nid).TCPHost)
+	}
+
+	for _, addr := range nodeAddrList {
+		conn, err := network.Dial("tcp", addr, MuxHeader)
+		if err != nil {
+			return err
+		}
+		defer conn.Close()
+
+		request := &DumpFieldValuesRequest{
+			Type:      RequestGetDiffData,
+			ShardID:   shardID,
+			FieldKey:  key,
+			StartTime: startTime,
+			EndTime:   endTime,
+		}
+
+		_, err = conn.Write([]byte{byte(request.Type)})
+		if err != nil {
+			return err
+		}
+
+		// Write the request
+		if err := json.NewEncoder(conn).Encode(request); err != nil {
+			return fmt.Errorf("encode ae request: %s", err)
+		}
+
+		var resp DumpFieldValuesResponse
+		// Read the response
+		if err := json.NewDecoder(conn).Decode(&resp); err != nil {
+			return err
+		}
+	}
+	return nil
 }
