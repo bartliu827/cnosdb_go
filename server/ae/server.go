@@ -13,6 +13,7 @@ import (
 	"math"
 	"net"
 	"os"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -165,7 +166,10 @@ func (s *Service) Check(shardID uint64, interval int64) ([]DiffShardInfo, error)
 		return nil, errors.New("the ShardDigest what it got in all nodes are nil ")
 	}
 
-	result := getDiffDataInfo(hashs, start, end, interval, shardID)
+	result, err := getDiffDataInfo(hashs, start, end, interval, shardID)
+	if err != nil {
+		return nil, err
+	}
 
 	fmt.Printf("result")
 	fmt.Println(result)
@@ -173,66 +177,50 @@ func (s *Service) Check(shardID uint64, interval int64) ([]DiffShardInfo, error)
 	return result, nil
 }
 
-func getDiffDataInfo(hashs []map[string][]FieldRangeDigest, start, end, interval int64, shardID uint64) []DiffShardInfo {
+func getDiffDataInfo(hashs []map[string][]FieldRangeDigest, start, end, interval int64, shardID uint64) ([]DiffShardInfo, error) {
 	// start, end
-	//aa
 	res := make([]DiffShardInfo, 0)
 	nodeCount := len(hashs)
-	fieldMap := make(map[string]int)
+
+	// key: start-end-hash-field
+	// value: count
+	count := make(map[string]int)
 	for _, node := range hashs {
-		for key, _ := range node {
-			fieldMap[key]++
-		}
-	}
-	// count, hash. isWrong
-	record := make(map[string][][]uint64, len(fieldMap))
-	for field, _ := range fieldMap {
-		record[field] = make([][]uint64, (end-start+interval-1)/interval)
-		for i := 0; i < len(record[field]); i++ {
-			record[field][i] = []uint64{0, 0, 0}
-		}
-		for j := 0; j < nodeCount; j++ {
-			for k := 0; k < len(hashs[j][field]); k++ {
-				idx := (hashs[j][field][k].StartTime - start) / interval
-				if _, ok := hashs[j][field]; !ok {
-					//if res[field] == nil {
-					//	res[field] = make([][]int64, 0)
-					//}
-					//res[field] = append(res[field], []int64{startTime, endTime})
-					record[field][idx][2] = 1
-					break
-				}
-				if hashs[j][field][idx].StartTime == (start + idx*interval) {
-					if record[field][idx][2] == 1 || (record[field][idx][1] != 0 && record[field][idx][1] != hashs[j][field][idx].Digest) {
-						record[field][idx][2] = 1
-						break
-					}
-					record[field][idx][0]++
-					record[field][idx][1] = hashs[j][field][idx].Digest
-				}
+		for field, values := range node {
+			for _, value := range values {
+				key := fmt.Sprintf("%s-%s-%s-%s", value.StartTime, value.EndTime, value.Digest, field)
+				count[key]++
 			}
 		}
 	}
-
-	for field, values := range record {
-		for i := 0; i < len(values); i++ {
-			if record[field][i][2] == 1 {
-				startTime := start + int64(i)*interval
-				endTime := startTime + interval
-				if endTime > end {
-					endTime = end
-				}
-				res = append(res, DiffShardInfo{
-					shardID: shardID,
-					key:     field,
-					start:   startTime,
-					end:     endTime,
-				})
-			}
+	//it's used to distinct
+	rdMap := make(map[string]bool)
+	for key, value := range count {
+		if value != nodeCount {
+			ss := strings.Split(key, "-")
+			rdMap[fmt.Sprintf("%s-%s-%s", ss[0], ss[1], ss[3])] = true
 		}
 	}
+	for key, _ := range rdMap {
+		ss := strings.Split(key, "-")
+		start, err := strconv.ParseInt(ss[0], 10, 64)
+		if err != nil {
+			return nil, err
+		}
+		end, _ := strconv.ParseInt(ss[1], 10, 64)
+		if err != nil {
+			return nil, err
+		}
+		field := ss[2]
+		res = append(res, DiffShardInfo{
+			shardID: shardID,
+			start:   start,
+			end:     end,
+			key:     field,
+		})
+	}
 
-	return res
+	return res, nil
 }
 
 // serve serves snapshot requests from the listener.
