@@ -29,7 +29,7 @@ var (
 	ErrUnknownEngineFormat = errors.New("unknown engine format")
 )
 
-type ScanFiledFunc func(key string, ts int64, val interface{}) error
+type ScanFiledFunc func(key string, ts int64, dataType cnosql.DataType, val interface{}) error
 
 // Engine represents a swappable storage engine for the shard.
 type Engine interface {
