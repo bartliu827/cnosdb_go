@@ -208,7 +208,8 @@ func (s *Service) handleConn(conn net.Conn) error {
 	}
 
 	switch RequestType(typ[0]) {
-	case Requestxxxxxxx:
+	case RequestDumpFieldValues:
+		return s.processDumpFieldValues(conn)
 
 	case RequestShardIntervalHash:
 		r, err := s.readShardDigestRequest(conn)
@@ -222,8 +223,6 @@ func (s *Service) handleConn(conn net.Conn) error {
 	default:
 		return fmt.Errorf("ae request type unknown: %v", typ)
 	}
-
-	return nil
 }
 
 func (s *Service) routineLoop() {
