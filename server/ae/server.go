@@ -9,6 +9,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/cnosdb/cnosdb/pkg/network"
+	"hash/fnv"
 	"io"
 	"math"
 	"net"
@@ -16,8 +18,6 @@ import (
 	"strings"
 	"sync"
 	"time"
-
-	"github.com/cnosdb/cnosdb/pkg/network"
 
 	"github.com/cnosdb/cnosdb/meta"
 	"github.com/cnosdb/cnosdb/vend/cnosql"
@@ -134,7 +134,7 @@ func (s *Service) Check(shardID uint64, interval int64) ([]DiffShardInfo, error)
 		defer conn.Close()
 
 		request := &ShardDigestRequest{
-			Type:     RequestShardIntervalHash,
+			Type:     RequestShardDigests,
 			ShardID:  shardID,
 			Interval: interval,
 		}
@@ -155,7 +155,6 @@ func (s *Service) Check(shardID uint64, interval int64) ([]DiffShardInfo, error)
 			return nil, err
 		}
 
-		hashs = append(hashs, resp.Hash)
 	}
 	fmt.Printf("hashs:")
 	fmt.Println(hashs)
@@ -276,6 +275,9 @@ func (s *Service) handleConn(conn net.Conn) error {
 	case RequestDumpFieldValues:
 		return s.processDumpFieldValues(conn)
 
+	case RequestShardDigests:
+		return s.processShardDigests(conn)
+
 	default:
 		return fmt.Errorf("ae request type unknown: %v", typ)
 	}
@@ -316,9 +318,11 @@ func (s *Service) shardDigest(shardId uint64, start, end, interval int64, addr s
 	defer conn.Close()
 
 	request := &ShardDigestRequest{
-		Type:     RequestShardIntervalHash,
-		ShardID:  shardId,
-		Interval: interval,
+		Type:      RequestShardDigests,
+		StartTime: start,
+		EndTime:   end,
+		ShardID:   shardId,
+		Interval:  interval,
 	}
 
 	_, err = conn.Write([]byte{byte(request.Type)})
@@ -333,11 +337,11 @@ func (s *Service) shardDigest(shardId uint64, start, end, interval int64, addr s
 
 	var resp ShardDigestResponse
 	// Read the response
-	if err := json.NewDecoder(conn).Decode(&resp); err != nil {
+	if err := gob.NewDecoder(conn).Decode(&resp.Hash); err != nil {
 		return nil, err
 	}
 
-	return nil, nil
+	return resp.Hash, nil
 }
 
 func (s *Service) inspection(shardId uint64) {
@@ -346,6 +350,38 @@ func (s *Service) inspection(shardId uint64) {
 	//s.dumpFieldValues()
 	//s.findLostFieldValues()
 	//s.WriteShard()
+}
+
+func (s *Service) computeShardDigest(shardID uint64, startTime, endTime, interval int64) (map[string][]FieldRangeDigest, error) {
+	resultSet := make(map[string][]FieldRangeDigest)
+
+	for i := startTime; i < endTime; i += interval {
+		st := i
+		et := i + interval
+		if et > endTime {
+			et = endTime
+		}
+		keyTV := make(map[string][]byte)
+		err := s.TSDBStore.ScanFiledValue(shardID, "", st, et, func(key string, ts int64, dt cnosql.DataType, val interface{}) error {
+			var item []byte
+			item = append(item, []byte(fmt.Sprintf("%d", ts))...)
+			item = append(item, []byte(fmt.Sprintf("%v", val))...)
+
+			keyTV[key] = append(keyTV[key], item...)
+			return nil
+		})
+		for k, v := range keyTV {
+			new64 := fnv.New64()
+			new64.Write([]byte(k))
+			new64.Write(v)
+			sum64 := new64.Sum64()
+			resultSet[k] = append(resultSet[k], FieldRangeDigest{st, et, sum64})
+		}
+		if err != nil {
+			return nil, err
+		}
+	}
+	return resultSet, nil
 }
 
 func (s *Service) dumpFieldValuesReq(key string, shardId uint64,
@@ -459,30 +495,24 @@ func (s *Service) digest_example() {
 
 }
 
-func (s *Service) getShardIntervalHash(conn net.Conn, shardID uint64, interval int64) error {
-	s.Logger.Info("get the request msg")
+func (s *Service) processShardDigests(conn net.Conn) error {
+	req := ShardDigestRequest{}
+	jsonDecoder := json.NewDecoder(conn)
 
-	resp := ShardDigestResponse{}
-	//获取shqrd段的hash值
-	//data := s.MetaClient.Data()
-
-	_, _, sg := s.MetaClient.ShardOwner(shardID)
-	start := sg.StartTime.UnixNano()
-	end := sg.EndTime.UnixNano()
-
-	//name := RandomString(4)
-	//var resultSet map[string][]int64
-	for i := start; i < end; i += interval {
-		//TODO: get data from shard and compute their hash value
-
-		//fnv64Hash := fnv.New64()
-		//fnv64Hash.Write(d)
-		//h := fnv64Hash.Sum64()
-		//res.Hash = append(res.Hash, h)
+	if err := jsonDecoder.Decode(&req); err != nil {
+		return err
 	}
-	s.Logger.Info("return the hash value")
-	//s.Logger.Info(fmt.Sprint(res))
-	if err := json.NewEncoder(conn).Encode(resp); err != nil {
+
+	s.Logger.Info("get the request msg")
+	//get shard Digest
+	resultSet, err := s.computeShardDigest(req.ShardID, req.StartTime, req.EndTime, req.Interval)
+	if err != nil {
+		return err
+	}
+
+	s.Logger.Info("send the shard digest back")
+
+	if err := gob.NewEncoder(conn).Encode(resultSet); err != nil {
 		return fmt.Errorf("encode resonse: %s", err.Error())
 	}
 
@@ -549,7 +579,7 @@ const (
 	RequestDumpFieldValues
 
 	RequestGetDiffData
-	RequestShardIntervalHash
+	RequestShardDigests
 )
 
 type FieldRangeDigest struct {
