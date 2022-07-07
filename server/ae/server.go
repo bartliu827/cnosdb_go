@@ -16,8 +16,6 @@ import (
 	"strings"
 	"sync"
 
-	"github.com/cnosdb/cnosdb/pkg/network"
-
 	"github.com/cnosdb/cnosdb/meta"
 	"github.com/cnosdb/cnosdb/vend/cnosql"
 	"github.com/cnosdb/cnosdb/vend/db/models"
@@ -212,14 +210,8 @@ func (s *Service) handleConn(conn net.Conn) error {
 		return s.processDumpFieldValues(conn)
 
 	case RequestShardIntervalHash:
-		r, err := s.readShardDigestRequest(conn)
-		if err != nil {
-			return err
-		}
-		err = s.getShardIntervalHash(conn, r.ShardID, r.Interval, r.StartTime, r.EndTime)
-		if err != nil {
-			return err
-		}
+		return s.getShardIntervalHash(conn)
+
 	default:
 		return fmt.Errorf("ae request type unknown: %v", typ)
 	}
@@ -247,7 +239,7 @@ func (s *Service) shardDigest(shardID uint64, startTime, endTime, interval int64
 			et = endTime
 		}
 		keyTV := make(map[string][]byte)
-		err := s.TSDBStore.ScanFiledValue(shardID, "", st, et, func(key string, ts int64, val interface{}) error {
+		err := s.TSDBStore.ScanFiledValue(shardID, "", st, et, func(key string, ts int64, dt cnosql.DataType, val interface{}) error {
 			var item []byte
 			item = append(item, []byte(fmt.Sprintf("%d", ts))...)
 			item = append(item, []byte(fmt.Sprintf("%v", val))...)
@@ -358,17 +350,6 @@ func (s *Service) findInconsistentRange() {
 func (s *Service) findLostFieldValues() {
 }
 
-func (s *Service) readShardDigestRequest(conn net.Conn) (ShardDigestRequest, error) {
-	var r ShardDigestRequest
-	d := json.NewDecoder(conn)
-
-	if err := d.Decode(&r); err != nil {
-		return r, err
-	}
-
-	return r, nil
-}
-
 func (s *Service) WriteShard(shardID, ownerID uint64, points []models.Point) error {
 	if ownerID != s.Node.ID {
 		return s.WriteShard(shardID, ownerID, points)
@@ -390,15 +371,22 @@ func (s *Service) digest_example() {
 
 }
 
-func (s *Service) getShardIntervalHash(conn net.Conn, shardID uint64, interval, startTime, endTime int64) error {
+func (s *Service) getShardIntervalHash(conn net.Conn) error {
+	req := ShardDigestRequest{}
+	jsonDecoder := json.NewDecoder(conn)
+
+	if err := jsonDecoder.Decode(&req); err != nil {
+		return err
+	}
+
 	s.Logger.Info("get the request msg")
 	//get shard Digest
-	resultSet, err := s.shardDigest(shardID, startTime, endTime, interval)
+	resultSet, err := s.shardDigest(req.ShardID, req.StartTime, req.EndTime, req.Interval)
 	if err != nil {
 		return err
 	}
 
-	s.Logger.Info("return the result")
+	s.Logger.Info("send the result")
 
 	if err := gob.NewEncoder(conn).Encode(resultSet); err != nil {
 		return fmt.Errorf("encode resonse: %s", err.Error())
