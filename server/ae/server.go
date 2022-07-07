@@ -263,6 +263,8 @@ func (s *Service) handleConn(conn net.Conn) error {
 	switch RequestType(typ[0]) {
 	case RequestDumpFieldValues:
 		return s.processDumpFieldValues(conn)
+	case RequestRepairShard:
+		return s.ProcessRepairShard(conn)
 
 	default:
 		return fmt.Errorf("ae request type unknown: %v", typ)
@@ -371,6 +373,34 @@ func (s *Service) dumpFieldValuesReq(key string, shardId uint64,
 	dataType := cnosql.DataType(dataByte)
 
 	return &FieldValueIterator{reader: buf, dataType: dataType}, dataType, nil
+}
+
+func (s *Service) ProcessRepairShard(conn net.Conn) error {
+	var r RepairShardRequest
+	d := json.NewDecoder(conn)
+
+	if err := d.Decode(&r); err != nil {
+		return err
+	}
+
+	localAddr := s.Listener.Addr().String()
+	s.Logger.Info("repair shard command ",
+		zap.String("Local", localAddr),
+		zap.Uint64("ShardID", r.ShardID))
+
+	//_, _, sg := s.MetaClient.ShardOwner(r.ShardID)
+	//start := sg.StartTime.UnixNano()
+	//end := sg.EndTime.UnixNano()
+
+	//s.shardDigest(r.ShardID, start, end, )
+	//findInconsistentRange()
+	//s.dumpFieldValues()
+	//s.findLostFieldValues()
+	//s.WriteShard()
+
+	io.WriteString(conn, "Repair Shard Succeeded")
+
+	return nil
 }
 
 func (s *Service) processDumpFieldValues(conn net.Conn) error {
@@ -538,7 +568,14 @@ const (
 
 	RequestGetDiffData
 	RequestShardIntervalHash
+
+	RequestRepairShard
 )
+
+type RepairShardRequest struct {
+	Type    RequestType
+	ShardID uint64
+}
 
 type FieldRangeDigest struct {
 	StartTime int64
