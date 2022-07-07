@@ -10,10 +10,12 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"net"
 	"os"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/cnosdb/cnosdb/pkg/network"
 
@@ -34,6 +36,8 @@ type Service struct {
 	wg sync.WaitGroup
 
 	Node *meta.Node
+
+	Interval int64
 
 	ShardWriter interface {
 		WriteShard(shardID, ownerID uint64, points []models.Point) error
@@ -59,7 +63,8 @@ type Service struct {
 // NewService returns a new instance of Service.
 func NewService() *Service {
 	return &Service{
-		Logger: zap.NewNop(),
+		Interval: int64(5 * 60 * time.Second),
+		Logger:   zap.NewNop(),
 	}
 }
 
@@ -277,7 +282,62 @@ func (s *Service) handleConn(conn net.Conn) error {
 }
 
 func (s *Service) routineLoop() {
-	//s.inspection(123)
+	for {
+		time.Sleep(time.Second * 1)
+		data := s.MetaClient.Data()
+		for _, db := range data.Databases {
+			shards := db.ShardInfos()
+
+			for _, shard := range shards {
+				if len(shard.Owners) < 2 {
+					continue
+				}
+
+				if shard.Owners[0].NodeID != s.Node.ID {
+					continue
+				}
+
+				for _, owner := range shard.Owners {
+					addr := data.DataNode(owner.NodeID).TCPHost
+					s.shardDigest(shard.ID, math.MinInt64, math.MaxInt64, s.Interval, addr)
+				}
+
+				time.Sleep(time.Second * 3)
+			}
+		}
+	}
+}
+
+func (s *Service) shardDigest(shardId uint64, start, end, interval int64, addr string) (map[string][]FieldRangeDigest, error) {
+	conn, err := network.Dial("tcp", addr, MuxHeader)
+	if err != nil {
+		return nil, err
+	}
+	defer conn.Close()
+
+	request := &ShardDigestRequest{
+		Type:     RequestShardIntervalHash,
+		ShardID:  shardId,
+		Interval: interval,
+	}
+
+	_, err = conn.Write([]byte{byte(request.Type)})
+	if err != nil {
+		return nil, err
+	}
+
+	// Write the request
+	if err := json.NewEncoder(conn).Encode(request); err != nil {
+		return nil, fmt.Errorf("encode snapshot request: %s", err)
+	}
+
+	var resp ShardDigestResponse
+	// Read the response
+	if err := json.NewDecoder(conn).Decode(&resp); err != nil {
+		return nil, err
+	}
+
+	return nil, nil
 }
 
 func (s *Service) inspection(shardId uint64) {
@@ -286,9 +346,6 @@ func (s *Service) inspection(shardId uint64) {
 	//s.dumpFieldValues()
 	//s.findLostFieldValues()
 	//s.WriteShard()
-}
-
-func (s *Service) shardDigest(shardId uint64, start, end, interval int64, addr string) {
 }
 
 func (s *Service) dumpFieldValuesReq(key string, shardId uint64,
@@ -389,6 +446,7 @@ func (s *Service) WriteShard(shardID, ownerID uint64, points []models.Point) err
 }
 
 func (s *Service) digest_example() {
+	models.ParsePointsString("")
 	//air,host=h1,station=XiaoMaiDao#~#visibility
 	file, _ := os.Create("./scan_field")
 	defer file.Close()
