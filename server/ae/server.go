@@ -470,7 +470,49 @@ func (s *Service) processDumpFieldValues(conn net.Conn) error {
 func (s *Service) findInconsistentRange() {
 }
 
-func (s *Service) findLostFieldValues() {
+func (s *Service) findLostFieldValues(dsis []DiffShardInfo) (result []NodeShardLostPoints) {
+	//1.向各个node发送请求，拿回数据 ✅
+	//2.合并各个node的数据
+	//3.对于每个node，返回它所缺少的[]models.Point
+	data := s.MetaClient.Data()
+
+	for _, dsi := range dsis {
+		shardID := dsi.shardID
+		_, _, si := data.ShardDBRetentionAndInfo(shardID)
+		nodeList := make([]uint64, 0)
+		//get NodeIDs
+		for _, owner := range si.Owners {
+			nodeList = append(nodeList, owner.NodeID)
+		}
+		//get node_address
+		nodeAddrList := make([]string, 0)
+		for _, nid := range nodeList {
+			nodeAddrList = append(nodeAddrList, data.DataNode(nid).TCPHost)
+		}
+
+		//var fvis []*FieldValueIterator
+		//for _, addr := range nodeAddrList {
+		//	fvi, dType, err := s.dumpFieldValuesReq(dsi.key, dsi.shardID, dsi.start, dsi.end, addr)
+		//	if err != nil {
+		//		return nil
+		//	}
+		//
+		//	fvis = append(fvis, fvi)
+		//}
+		//var heap Int64Heap
+		//for idx, iter := range fvis {
+		//	ts, v, err2 := iter.Next()
+		//	if err2 != nil {
+		//		return nil
+		//	}
+		//
+		//	heap
+		//
+		//}
+
+	}
+
+	return nil
 }
 
 func (s *Service) WriteShard(shardID, ownerID uint64, points []models.Point) error {
@@ -609,6 +651,12 @@ type DumpFieldValuesRequest struct {
 }
 
 type DumpFieldValuesResponse struct {
+}
+
+type NodeShardLostPoints struct {
+	shardID uint64
+	ownerID uint64
+	points  []models.Point
 }
 
 func (s *Service) getDataByTime(conn net.Conn, key string, shardID uint64, start, end int64) error {
