@@ -9,15 +9,14 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"github.com/cnosdb/cnosdb/pkg/network"
 	"hash/fnv"
 	"io"
-	"math"
 	"net"
-	"os"
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/cnosdb/cnosdb/pkg/network"
 
 	"github.com/cnosdb/cnosdb/meta"
 	"github.com/cnosdb/cnosdb/vend/cnosql"
@@ -93,37 +92,46 @@ func (s *Service) WithLogger(log *zap.Logger) {
 	s.Logger = log.With(zap.String("service", "ae"))
 }
 
-type DiffShardInfo struct {
-	key     string
-	start   int64
-	end     int64
-	shardID uint64
+func (s *Service) routineLoop() {
+	for {
+		data := s.MetaClient.Data()
+		for _, db := range data.Databases {
+			shards := db.ShardInfos()
+
+			for _, shard := range shards {
+				if len(shard.Owners) < 2 {
+					continue
+				}
+
+				if shard.Owners[0].NodeID != s.Node.ID {
+					continue
+				}
+
+				time.Sleep(time.Second * 3)
+			}
+		}
+
+		time.Sleep(time.Second * 60)
+	}
 }
 
 // serve serves ae requests from the listener.
-func (s *Service) Check(shardID uint64, interval int64) ([]DiffShardInfo, error) {
-	//s.Logger.Info("1111")
+func (s *Service) checkShard(shardID uint64, interval int64) ([]DiffShardInfo, error) {
 	data := s.MetaClient.Data()
-	_, _, si := data.ShardDBRetentionAndInfo(shardID)
-	nodeList := make([]uint64, 0)
-	//get NodeIDs
-	for _, owner := range si.Owners {
-		nodeList = append(nodeList, owner.NodeID)
-	}
-	//get node_address
 	nodeAddrList := make([]string, 0)
-	for _, nid := range nodeList {
-		nodeAddrList = append(nodeAddrList, data.DataNode(nid).TCPHost)
+	start, end := data.ShardStartAndEndTime(shardID)
+	_, _, shardInfo := data.ShardDBRetentionAndInfo(shardID)
+	for _, owner := range shardInfo.Owners {
+		node := data.DataNode(owner.NodeID)
+		if node == nil {
+			return nil, fmt.Errorf("can't find node %d", owner.NodeID)
+		}
+		nodeAddrList = append(nodeAddrList, node.TCPHost)
 	}
-	//get shard startTime, endTime, and their hash values
-	//localHash := make([]uint64, 0)
-	_, _, sg := s.MetaClient.ShardOwner(shardID)
-	start := sg.StartTime.UnixNano()
-	end := sg.EndTime.UnixNano()
 
-	s.Logger.Info(fmt.Sprintf("%d: %d", start, end))
-
-	//s.Logger.Error("22222")
+	if len(nodeAddrList) < 2 {
+		return nil, nil
+	}
 
 	hashs := make([]map[string][]FieldRangeDigest, 0)
 	for _, addr := range nodeAddrList {
@@ -283,33 +291,6 @@ func (s *Service) handleConn(conn net.Conn) error {
 	}
 }
 
-func (s *Service) routineLoop() {
-	for {
-		time.Sleep(time.Second * 1)
-		data := s.MetaClient.Data()
-		for _, db := range data.Databases {
-			shards := db.ShardInfos()
-
-			for _, shard := range shards {
-				if len(shard.Owners) < 2 {
-					continue
-				}
-
-				if shard.Owners[0].NodeID != s.Node.ID {
-					continue
-				}
-
-				for _, owner := range shard.Owners {
-					addr := data.DataNode(owner.NodeID).TCPHost
-					s.shardDigest(shard.ID, math.MinInt64, math.MaxInt64, s.Interval, addr)
-				}
-
-				time.Sleep(time.Second * 3)
-			}
-		}
-	}
-}
-
 func (s *Service) shardDigest(shardId uint64, start, end, interval int64, addr string) (map[string][]FieldRangeDigest, error) {
 	conn, err := network.Dial("tcp", addr, MuxHeader)
 	if err != nil {
@@ -354,33 +335,36 @@ func (s *Service) inspection(shardId uint64) {
 
 func (s *Service) computeShardDigest(shardID uint64, startTime, endTime, interval int64) (map[string][]FieldRangeDigest, error) {
 	resultSet := make(map[string][]FieldRangeDigest)
-
-	for i := startTime; i < endTime; i += interval {
-		st := i
-		et := i + interval
-		if et > endTime {
-			et = endTime
+	for start := startTime; start < endTime; start += interval {
+		end := start + interval
+		if end > endTime {
+			end = endTime
 		}
-		keyTV := make(map[string][]byte)
-		err := s.TSDBStore.ScanFiledValue(shardID, "", st, et, func(key string, ts int64, dt cnosql.DataType, val interface{}) error {
-			var item []byte
-			item = append(item, []byte(fmt.Sprintf("%d", ts))...)
-			item = append(item, []byte(fmt.Sprintf("%v", val))...)
 
-			keyTV[key] = append(keyTV[key], item...)
+		valcount := 0
+		new64Hash := fnv.New64()
+		err := s.TSDBStore.ScanFiledValue(shardID, "", start, end, func(key string, ts int64, dt cnosql.DataType, val interface{}) error {
+			if ts != tsdb.EOF {
+				valcount += 1
+				new64Hash.Write(Slice(fmt.Sprintf("%d:%v", ts, val)))
+			}
+
+			if ts == tsdb.EOF && valcount > 0 {
+				digest := FieldRangeDigest{start, end, new64Hash.Sum64()}
+				resultSet[key] = append(resultSet[key], digest)
+
+				valcount = 0
+				new64Hash.Reset()
+			}
+
 			return nil
 		})
-		for k, v := range keyTV {
-			new64 := fnv.New64()
-			new64.Write([]byte(k))
-			new64.Write(v)
-			sum64 := new64.Sum64()
-			resultSet[k] = append(resultSet[k], FieldRangeDigest{st, et, sum64})
-		}
+
 		if err != nil {
 			return nil, err
 		}
 	}
+
 	return resultSet, nil
 }
 
@@ -547,24 +531,9 @@ func (s *Service) WriteShard(shardID, ownerID uint64, points []models.Point) err
 	}
 }
 
-func (s *Service) digest_example() {
-	models.ParsePointsString("")
-	//air,host=h1,station=XiaoMaiDao#~#visibility
-	file, _ := os.Create("./scan_field")
-	defer file.Close()
-	s.TSDBStore.ScanFiledValue(36, "", 1555144313000000000, 1755144315000000000,
-		func(key string, ts int64, ty cnosql.DataType, val interface{}) error {
-			file.WriteString(fmt.Sprintf("%s %d %v\n", key, ts, val))
-			//fmt.Printf("========ScanFiledValue %s %d %v\n", key, ts, val)
-			return nil
-		})
-
-}
-
 func (s *Service) processShardDigests(conn net.Conn) error {
 	req := ShardDigestRequest{}
 	jsonDecoder := json.NewDecoder(conn)
-
 	if err := jsonDecoder.Decode(&req); err != nil {
 		return err
 	}
@@ -648,6 +617,13 @@ const (
 	RequestShardDigests
 )
 
+type DiffShardInfo struct {
+	key     string
+	start   int64
+	end     int64
+	shardID uint64
+}
+
 type FieldRangeDigest struct {
 	StartTime int64
 	EndTime   int64
@@ -681,84 +657,4 @@ type NodeShardLostPoints struct {
 	shardID uint64
 	ownerID uint64
 	points  []models.Point
-}
-
-func (s *Service) getDataByTime(conn net.Conn, key string, shardID uint64, start, end int64) error {
-
-	res := DumpFieldValuesResponse{}
-	shard := s.TSDBStore.Shard(shardID)
-	//file, err := os.Create("./diffData")
-	//if err != nil {
-	//	return err
-	//}
-	//defer file.Close()
-	//bw := bufio.NewWriterSize(file, 1024*1024)
-	//defer bw.Flush()
-	//var w io.Writer = bw
-
-	var fn func(key string, ts int64, ty cnosql.DataType, val interface{}) error
-	fn = func(key string, ts int64, ty cnosql.DataType, val interface{}) error {
-		//if _, err := w.Write([]byte(fmt.Sprintf("%v", val))); err != nil {
-		//	return err
-		//}
-		return nil
-	}
-
-	if err := shard.ScanFiledValue(key, start, end, fn); err != nil {
-		return err
-	}
-
-	if err := json.NewEncoder(conn).Encode(res); err != nil {
-		return fmt.Errorf("encode resonse: %s", err.Error())
-	}
-
-	return nil
-}
-
-func (s *Service) GetDiffData(shardID uint64, key string, startTime, endTime int64) error {
-	data := s.MetaClient.Data()
-	_, _, si := data.ShardDBRetentionAndInfo(shardID)
-	nodeList := make([]uint64, 0)
-	//get NodeIDs
-	for _, owner := range si.Owners {
-		nodeList = append(nodeList, owner.NodeID)
-	}
-	//get node_address
-	nodeAddrList := make([]string, 0)
-	for _, nid := range nodeList {
-		nodeAddrList = append(nodeAddrList, data.DataNode(nid).TCPHost)
-	}
-
-	for _, addr := range nodeAddrList {
-		conn, err := network.Dial("tcp", addr, MuxHeader)
-		if err != nil {
-			return err
-		}
-		defer conn.Close()
-
-		request := &DumpFieldValuesRequest{
-			Type:      RequestGetDiffData,
-			ShardID:   shardID,
-			FieldKey:  key,
-			StartTime: startTime,
-			EndTime:   endTime,
-		}
-
-		_, err = conn.Write([]byte{byte(request.Type)})
-		if err != nil {
-			return err
-		}
-
-		// Write the request
-		if err := json.NewEncoder(conn).Encode(request); err != nil {
-			return fmt.Errorf("encode ae request: %s", err)
-		}
-
-		var resp DumpFieldValuesResponse
-		// Read the response
-		if err := json.NewDecoder(conn).Decode(&resp); err != nil {
-			return err
-		}
-	}
-	return nil
 }
