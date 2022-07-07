@@ -235,8 +235,36 @@ func (s *Service) inspection(shardId uint64) {
 	//s.WriteShard()
 }
 
-func (s *Service) shardDigest(shardId uint64, start, end, interval int64, addr string) {
+func (s *Service) shardDigest(shardID uint64, startTime, endTime, interval int64) (map[string][]FieldRangeDigest, error) {
+	resultSet := make(map[string][]FieldRangeDigest)
 
+	for i := startTime; i < endTime; i += interval {
+		st := i
+		et := i + interval
+		if et > endTime {
+			et = endTime
+		}
+		keyTV := make(map[string][]byte)
+		err := s.TSDBStore.ScanFiledValue(shardID, "", st, et, func(key string, ts int64, val interface{}) error {
+			var item []byte
+			item = append(item, []byte(fmt.Sprintf("%d", ts))...)
+			item = append(item, []byte(fmt.Sprintf("%v", val))...)
+
+			keyTV[key] = append(keyTV[key], item...)
+			return nil
+		})
+		for k, v := range keyTV {
+			new64 := fnv.New64()
+			new64.Write([]byte(k))
+			new64.Write(v)
+			sum64 := new64.Sum64()
+			resultSet[k] = append(resultSet[k], FieldRangeDigest{st, et, sum64})
+		}
+		if err != nil {
+			return nil, err
+		}
+	}
+	return resultSet, nil
 }
 
 func (s *Service) dumpFieldValues(key string, shardId uint64, start, end, addr string) {
@@ -282,35 +310,10 @@ func (s *Service) digest_example() {
 
 func (s *Service) getShardIntervalHash(conn net.Conn, shardID uint64, interval, startTime, endTime int64) error {
 	s.Logger.Info("get the request msg")
-
-	resultSet := make(map[string][]FieldRangeDigest)
-
-	for i := startTime; i < endTime; i += interval {
-		//TODO: get data from shard and compute their hash value
-		st := i
-		et := i + interval
-		if et > endTime {
-			et = endTime
-		}
-		keyTV := make(map[string][]byte)
-		err := s.TSDBStore.ScanFiledValue(shardID, "", st, et, func(key string, ts int64, val interface{}) error {
-			var item []byte
-			item = append(item, []byte(fmt.Sprintf("%d", ts))...)
-			item = append(item, []byte(fmt.Sprintf("%v", val))...)
-
-			keyTV[key] = append(keyTV[key], item...)
-			return nil
-		})
-		for k, v := range keyTV {
-			new64 := fnv.New64()
-			new64.Write([]byte(k))
-			new64.Write(v)
-			sum64 := new64.Sum64()
-			resultSet[k] = append(resultSet[k], FieldRangeDigest{st, et, sum64})
-		}
-		if err != nil {
-			return err
-		}
+	//get shard Digest
+	resultSet, err := s.shardDigest(shardID, startTime, endTime, interval)
+	if err != nil {
+		return err
 	}
 
 	s.Logger.Info("return the result")
