@@ -126,7 +126,7 @@ func (s *Service) Check(shardID uint64, interval int64) ([][]int64, error) {
 		defer conn.Close()
 
 		request := &ShardDigestRequest{
-			Type:     RequestShardIntervalHash,
+			Type:     RequestShardDigests,
 			ShardID:  shardID,
 			Interval: interval,
 		}
@@ -214,8 +214,8 @@ func (s *Service) handleConn(conn net.Conn) error {
 	case RequestDumpFieldValues:
 		return s.processDumpFieldValues(conn)
 
-	case RequestShardIntervalHash:
-		return s.getShardIntervalHash(conn)
+	case RequestShardDigests:
+		return s.processShardDigests(conn)
 
 	default:
 		return fmt.Errorf("ae request type unknown: %v", typ)
@@ -257,9 +257,11 @@ func (s *Service) shardDigest(shardId uint64, start, end, interval int64, addr s
 	defer conn.Close()
 
 	request := &ShardDigestRequest{
-		Type:     RequestShardIntervalHash,
-		ShardID:  shardId,
-		Interval: interval,
+		Type:      RequestShardDigests,
+		StartTime: start,
+		EndTime:   end,
+		ShardID:   shardId,
+		Interval:  interval,
 	}
 
 	_, err = conn.Write([]byte{byte(request.Type)})
@@ -274,11 +276,11 @@ func (s *Service) shardDigest(shardId uint64, start, end, interval int64, addr s
 
 	var resp ShardDigestResponse
 	// Read the response
-	if err := json.NewDecoder(conn).Decode(&resp); err != nil {
+	if err := gob.NewDecoder(conn).Decode(&resp.Hashes); err != nil {
 		return nil, err
 	}
 
-	return nil, nil
+	return resp.Hashes, nil
 }
 
 func (s *Service) inspection(shardId uint64) {
@@ -289,7 +291,7 @@ func (s *Service) inspection(shardId uint64) {
 	//s.WriteShard()
 }
 
-func (s *Service) shardDigest(shardID uint64, startTime, endTime, interval int64) (map[string][]FieldRangeDigest, error) {
+func (s *Service) computeShardDigest(shardID uint64, startTime, endTime, interval int64) (map[string][]FieldRangeDigest, error) {
 	resultSet := make(map[string][]FieldRangeDigest)
 
 	for i := startTime; i < endTime; i += interval {
@@ -432,7 +434,7 @@ func (s *Service) digest_example() {
 
 }
 
-func (s *Service) getShardIntervalHash(conn net.Conn) error {
+func (s *Service) processShardDigests(conn net.Conn) error {
 	req := ShardDigestRequest{}
 	jsonDecoder := json.NewDecoder(conn)
 
@@ -442,12 +444,12 @@ func (s *Service) getShardIntervalHash(conn net.Conn) error {
 
 	s.Logger.Info("get the request msg")
 	//get shard Digest
-	resultSet, err := s.shardDigest(req.ShardID, req.StartTime, req.EndTime, req.Interval)
+	resultSet, err := s.computeShardDigest(req.ShardID, req.StartTime, req.EndTime, req.Interval)
 	if err != nil {
 		return err
 	}
 
-	s.Logger.Info("send the result")
+	s.Logger.Info("send the shard digest back")
 
 	if err := gob.NewEncoder(conn).Encode(resultSet); err != nil {
 		return fmt.Errorf("encode resonse: %s", err.Error())
@@ -516,7 +518,7 @@ const (
 	RequestDumpFieldValues
 
 	RequestGetDiffData
-	RequestShardIntervalHash
+	RequestShardDigests
 )
 
 type FieldRangeDigest struct {
@@ -534,7 +536,7 @@ type ShardDigestRequest struct {
 }
 
 type ShardDigestResponse struct {
-	Hash map[string][]FieldRangeDigest
+	Hashes map[string][]FieldRangeDigest
 }
 
 type DumpFieldValuesRequest struct {
