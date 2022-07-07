@@ -485,30 +485,54 @@ func (s *Service) findLostFieldValues(dsis []DiffShardInfo) (result []NodeShardL
 			nodeList = append(nodeList, owner.NodeID)
 		}
 		//get node_address
+		addr2nid := make(map[string]uint64)
 		nodeAddrList := make([]string, 0)
 		for _, nid := range nodeList {
-			nodeAddrList = append(nodeAddrList, data.DataNode(nid).TCPHost)
+			tcpHost := data.DataNode(nid).TCPHost
+			nodeAddrList = append(nodeAddrList, tcpHost)
+			addr2nid[tcpHost] = nid
 		}
 
-		//var fvis []*FieldValueIterator
-		//for _, addr := range nodeAddrList {
-		//	fvi, dType, err := s.dumpFieldValuesReq(dsi.key, dsi.shardID, dsi.start, dsi.end, addr)
-		//	if err != nil {
-		//		return nil
-		//	}
-		//
-		//	fvis = append(fvis, fvi)
-		//}
-		//var heap Int64Heap
-		//for idx, iter := range fvis {
-		//	ts, v, err2 := iter.Next()
-		//	if err2 != nil {
-		//		return nil
-		//	}
-		//
-		//	heap
-		//
-		//}
+		var fvis []*FieldValueIterator
+
+		for _, addr := range nodeAddrList {
+			fvi, _, err := s.dumpFieldValuesReq(dsi.key, dsi.shardID, dsi.start, dsi.end, addr)
+			if err != nil {
+				return nil
+			}
+
+			fvis = append(fvis, fvi)
+		}
+		//init heap
+		arr := make([]int64, len(fvis))
+		for idx, iter := range fvis {
+			ts, _, err2 := iter.Next()
+			arr[idx] = ts
+			if err2 != nil {
+				return nil
+			}
+		}
+		for {
+			mints := tsdb.EOF
+			for idx, _ := range arr {
+				if arr[idx] == tsdb.EOF {
+					continue
+				}
+				if arr[idx] == mints {
+					ts, val, err := fvis[idx].Next()
+					if err != nil {
+						return nil
+					}
+					arr[idx] = ts
+				} else {
+					//不相同,添加到[]
+
+				}
+			}
+			if mints == -1 {
+				break
+			}
+		}
 
 	}
 
