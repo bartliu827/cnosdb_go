@@ -7,6 +7,7 @@ import (
 	"encoding/binary"
 	"encoding/gob"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"github.com/cnosdb/cnosdb/pkg/network"
 	"hash/fnv"
@@ -92,8 +93,15 @@ func (s *Service) WithLogger(log *zap.Logger) {
 	s.Logger = log.With(zap.String("service", "ae"))
 }
 
+type DiffShardInfo struct {
+	key     string
+	start   int64
+	end     int64
+	shardID uint64
+}
+
 // serve serves ae requests from the listener.
-func (s *Service) Check(shardID uint64, interval int64) ([][]int64, error) {
+func (s *Service) Check(shardID uint64, interval int64) ([]DiffShardInfo, error) {
 	//s.Logger.Info("1111")
 	data := s.MetaClient.Data()
 	_, _, si := data.ShardDBRetentionAndInfo(shardID)
@@ -117,7 +125,7 @@ func (s *Service) Check(shardID uint64, interval int64) ([][]int64, error) {
 
 	//s.Logger.Error("22222")
 
-	hashs := make([][]int64, 0)
+	hashs := make([]map[string][]FieldRangeDigest, 0)
 	for _, addr := range nodeAddrList {
 		conn, err := network.Dial("tcp", addr, MuxHeader)
 		if err != nil {
@@ -143,7 +151,7 @@ func (s *Service) Check(shardID uint64, interval int64) ([][]int64, error) {
 
 		var resp ShardDigestResponse
 		// Read the response
-		if err := json.NewDecoder(conn).Decode(&resp); err != nil {
+		if err := gob.NewDecoder(conn).Decode(&resp); err != nil {
 			return nil, err
 		}
 
@@ -151,26 +159,79 @@ func (s *Service) Check(shardID uint64, interval int64) ([][]int64, error) {
 	fmt.Printf("hashs:")
 	fmt.Println(hashs)
 
-	result := make([][]int64, 0)
 	//validate the hash values, find out the diff, add the time duration into result
-	if hashs == nil {
-		return nil, nil
+	if len(hashs) == 0 {
+		return nil, errors.New("the ShardDigest what it got in all nodes are nil ")
 	}
-	for j := 0; j < len(hashs[0]); j++ {
-		tmp := hashs[0][j]
-		for i := 0; i < len(hashs); i++ {
-			if tmp != hashs[i][j] {
-				st := start + int64(j)*interval
-				et := st + interval
-				result = append(result, []int64{st, et})
-				continue
-			}
-		}
-	}
+
+	result := getDiffDataInfo(hashs, start, end, interval, shardID)
+
 	fmt.Printf("result")
 	fmt.Println(result)
 
 	return result, nil
+}
+
+func getDiffDataInfo(hashs []map[string][]FieldRangeDigest, start, end, interval int64, shardID uint64) []DiffShardInfo {
+	// start, end
+	//aa
+	res := make([]DiffShardInfo, 0)
+	nodeCount := len(hashs)
+	fieldMap := make(map[string]int)
+	for _, node := range hashs {
+		for key, _ := range node {
+			fieldMap[key]++
+		}
+	}
+	// count, hash. isWrong
+	record := make(map[string][][]uint64, len(fieldMap))
+	for field, _ := range fieldMap {
+		record[field] = make([][]uint64, (end-start+interval-1)/interval)
+		for i := 0; i < len(record[field]); i++ {
+			record[field][i] = []uint64{0, 0, 0}
+		}
+		for j := 0; j < nodeCount; j++ {
+			for k := 0; k < len(hashs[j][field]); k++ {
+				idx := (hashs[j][field][k].StartTime - start) / interval
+				if _, ok := hashs[j][field]; !ok {
+					//if res[field] == nil {
+					//	res[field] = make([][]int64, 0)
+					//}
+					//res[field] = append(res[field], []int64{startTime, endTime})
+					record[field][idx][2] = 1
+					break
+				}
+				if hashs[j][field][idx].StartTime == (start + idx*interval) {
+					if record[field][idx][2] == 1 || (record[field][idx][1] != 0 && record[field][idx][1] != hashs[j][field][idx].Digest) {
+						record[field][idx][2] = 1
+						break
+					}
+					record[field][idx][0]++
+					record[field][idx][1] = hashs[j][field][idx].Digest
+				}
+			}
+		}
+	}
+
+	for field, values := range record {
+		for i := 0; i < len(values); i++ {
+			if record[field][i][2] == 1 {
+				startTime := start + int64(i)*interval
+				endTime := startTime + interval
+				if endTime > end {
+					endTime = end
+				}
+				res = append(res, DiffShardInfo{
+					shardID: shardID,
+					key:     field,
+					start:   startTime,
+					end:     endTime,
+				})
+			}
+		}
+	}
+
+	return res
 }
 
 // serve serves snapshot requests from the listener.
@@ -536,7 +597,7 @@ type ShardDigestRequest struct {
 }
 
 type ShardDigestResponse struct {
-	Hashes map[string][]FieldRangeDigest
+	Hash map[string][]FieldRangeDigest
 }
 
 type DumpFieldValuesRequest struct {
