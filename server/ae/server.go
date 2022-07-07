@@ -337,11 +337,11 @@ func (s *Service) shardDigest(shardId uint64, start, end, interval int64, addr s
 
 	var resp ShardDigestResponse
 	// Read the response
-	if err := gob.NewDecoder(conn).Decode(&resp.Hashes); err != nil {
+	if err := gob.NewDecoder(conn).Decode(&resp.Hash); err != nil {
 		return nil, err
 	}
 
-	return resp.Hashes, nil
+	return resp.Hash, nil
 }
 
 func (s *Service) inspection(shardId uint64) {
