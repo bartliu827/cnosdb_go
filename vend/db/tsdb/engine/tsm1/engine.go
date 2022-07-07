@@ -3170,6 +3170,9 @@ func (e *Engine) iteratorField(seriesKey, field string, dataType cnosql.DataType
 		for {
 			ts, val := cur.nextFloat()
 			if ts == tsdb.EOF || ts >= options.StopTime() {
+				if err := fn(key, tsdb.EOF, cnosql.Float, 0); err != nil {
+					return err
+				}
 				break
 			}
 
@@ -3183,6 +3186,9 @@ func (e *Engine) iteratorField(seriesKey, field string, dataType cnosql.DataType
 		for {
 			ts, val := cur.nextInteger()
 			if ts == tsdb.EOF || ts >= options.StopTime() {
+				if err := fn(key, tsdb.EOF, cnosql.Integer, 0); err != nil {
+					return err
+				}
 				break
 			}
 
@@ -3197,6 +3203,9 @@ func (e *Engine) iteratorField(seriesKey, field string, dataType cnosql.DataType
 		for {
 			ts, val := cur.nextUnsigned()
 			if ts == tsdb.EOF || ts >= options.StopTime() {
+				if err := fn(key, tsdb.EOF, cnosql.Unsigned, 0); err != nil {
+					return err
+				}
 				break
 			}
 
@@ -3211,6 +3220,9 @@ func (e *Engine) iteratorField(seriesKey, field string, dataType cnosql.DataType
 		for {
 			ts, val := cur.nextString()
 			if ts == tsdb.EOF || ts >= options.StopTime() {
+				if err := fn(key, tsdb.EOF, cnosql.String, ""); err != nil {
+					return err
+				}
 				break
 			}
 
@@ -3224,6 +3236,9 @@ func (e *Engine) iteratorField(seriesKey, field string, dataType cnosql.DataType
 		for {
 			ts, val := cur.nextBoolean()
 			if ts == tsdb.EOF || ts >= options.StopTime() {
+				if err := fn(key, tsdb.EOF, cnosql.Boolean, false); err != nil {
+					return err
+				}
 				break
 			}
 
