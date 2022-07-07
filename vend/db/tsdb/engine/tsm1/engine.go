@@ -3173,7 +3173,7 @@ func (e *Engine) iteratorField(seriesKey, field string, dataType cnosql.DataType
 				break
 			}
 
-			if err := fn(key, ts, val); err != nil {
+			if err := fn(key, ts, cnosql.Float, val); err != nil {
 				return err
 			}
 		}
@@ -3186,7 +3186,7 @@ func (e *Engine) iteratorField(seriesKey, field string, dataType cnosql.DataType
 				break
 			}
 
-			if err := fn(key, ts, val); err != nil {
+			if err := fn(key, ts, cnosql.Integer, val); err != nil {
 				return err
 			}
 		}
@@ -3200,7 +3200,7 @@ func (e *Engine) iteratorField(seriesKey, field string, dataType cnosql.DataType
 				break
 			}
 
-			if err := fn(key, ts, val); err != nil {
+			if err := fn(key, ts, cnosql.Unsigned, val); err != nil {
 				return err
 			}
 		}
@@ -3214,7 +3214,7 @@ func (e *Engine) iteratorField(seriesKey, field string, dataType cnosql.DataType
 				break
 			}
 
-			if err := fn(key, ts, val); err != nil {
+			if err := fn(key, ts, cnosql.String, val); err != nil {
 				return err
 			}
 		}
@@ -3227,7 +3227,7 @@ func (e *Engine) iteratorField(seriesKey, field string, dataType cnosql.DataType
 				break
 			}
 
-			if err := fn(key, ts, val); err != nil {
+			if err := fn(key, ts, cnosql.Boolean, val); err != nil {
 				return err
 			}
 		}

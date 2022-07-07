@@ -2,7 +2,9 @@
 package ae
 
 import (
+	"bufio"
 	"encoding"
+	"encoding/binary"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -14,6 +16,7 @@ import (
 	"github.com/cnosdb/cnosdb/pkg/network"
 
 	"github.com/cnosdb/cnosdb/meta"
+	"github.com/cnosdb/cnosdb/vend/cnosql"
 	"github.com/cnosdb/cnosdb/vend/db/models"
 	"github.com/cnosdb/cnosdb/vend/db/tsdb"
 	"go.uber.org/zap"
@@ -227,7 +230,87 @@ func (s *Service) inspection(shardId uint64) {
 func (s *Service) shardDigest(shardId uint64, start, end, interval int64, addr string) {
 }
 
-func (s *Service) dumpFieldValues(key string, shardId uint64, start, end, addr string) {
+func (s *Service) dumpFieldValuesReq(key string, shardId uint64,
+	start, end int64, addr string) (*FieldValueIterator, cnosql.DataType, error) {
+	request := DumpFieldValuesRequest{
+		Type:      RequestDumpFieldValues,
+		ShardID:   shardId,
+		FieldKey:  key,
+		StartTime: start,
+		EndTime:   end,
+	}
+
+	conn, err := network.Dial("tcp", addr, MuxHeader)
+	if err != nil {
+		return nil, 0, err
+	}
+	defer conn.Close()
+
+	_, err = conn.Write([]byte{byte(request.Type)})
+	if err != nil {
+		return nil, 0, err
+	}
+
+	// Write the request
+	if err := json.NewEncoder(conn).Encode(request); err != nil {
+		return nil, 0, fmt.Errorf("encode dump field values request: %s", err)
+	}
+
+	buf := bufio.NewReader(conn)
+	dataByte, err := buf.ReadByte()
+	if err != nil {
+		return nil, 0, err
+	}
+
+	dataType := cnosql.DataType(dataByte)
+
+	return &FieldValueIterator{reader: buf, dataType: dataType}, dataType, nil
+}
+
+func (s *Service) processDumpFieldValues(conn net.Conn) error {
+	req := DumpFieldValuesRequest{}
+	jsonDecoder := json.NewDecoder(conn)
+
+	if err := jsonDecoder.Decode(&req); err != nil {
+		return err
+	}
+
+	alreadyWriteType := false
+	buf := bufio.NewWriter(conn)
+	s.TSDBStore.ScanFiledValue(req.ShardID, req.FieldKey, req.StartTime, req.EndTime,
+		func(key string, ts int64, dataType cnosql.DataType, val interface{}) error {
+			if !alreadyWriteType {
+				if err := buf.WriteByte(byte(dataType)); err != nil {
+					return err
+				}
+				alreadyWriteType = true
+			}
+
+			if err := binary.Write(buf, binary.BigEndian, ts); err != nil {
+				return err
+			}
+
+			switch val := val.(type) {
+			case bool, int64, uint64, float64:
+				if err := binary.Write(buf, binary.BigEndian, val); err != nil {
+					return err
+				}
+			case string:
+				if err := binary.Write(buf, binary.BigEndian, uint32(len(val))); err != nil {
+					return err
+				}
+				if _, err := buf.WriteString(val); err != nil {
+					return err
+				}
+
+			default:
+				//do nothing
+			}
+
+			return nil
+		})
+
+	return nil
 }
 
 func (s *Service) findInconsistentRange() {
@@ -249,7 +332,7 @@ func (s *Service) digest_example() {
 	file, _ := os.Create("./scan_field")
 	defer file.Close()
 	s.TSDBStore.ScanFiledValue(36, "", 1555144313000000000, 1755144315000000000,
-		func(key string, ts int64, val interface{}) error {
+		func(key string, ts int64, ty cnosql.DataType, val interface{}) error {
 			file.WriteString(fmt.Sprintf("%s %d %v\n", key, ts, val))
 			//fmt.Printf("========ScanFiledValue %s %d %v\n", key, ts, val)
 			return nil
@@ -287,11 +370,64 @@ func (s *Service) getShardIntervalHash(conn net.Conn, shardID uint64, interval i
 	return nil
 }
 
+type FieldValueIterator struct {
+	reader   *bufio.Reader
+	dataType cnosql.DataType
+}
+
+func (it *FieldValueIterator) Next() (int64, interface{}, error) {
+	var ts int64
+	if err := binary.Read(it.reader, binary.BigEndian, &ts); err != nil {
+		return 0, 0, err
+	}
+
+	switch it.dataType {
+	case cnosql.Boolean:
+		var val bool
+		if err := binary.Read(it.reader, binary.BigEndian, &val); err != nil {
+			return 0, 0, err
+		}
+		return ts, val, nil
+	case cnosql.Integer:
+		var val int64
+		if err := binary.Read(it.reader, binary.BigEndian, &val); err != nil {
+			return 0, 0, err
+		}
+		return ts, val, nil
+	case cnosql.Unsigned:
+		var val uint64
+		if err := binary.Read(it.reader, binary.BigEndian, &val); err != nil {
+			return 0, 0, err
+		}
+		return ts, val, nil
+	case cnosql.Float:
+		var val float64
+		if err := binary.Read(it.reader, binary.BigEndian, &val); err != nil {
+			return 0, 0, err
+		}
+		return ts, val, nil
+	case cnosql.String:
+		var len uint32
+		if err := binary.Read(it.reader, binary.BigEndian, &len); err != nil {
+			return 0, 0, err
+		}
+
+		bytes := make([]byte, len)
+		if _, err := io.ReadFull(it.reader, bytes); err != nil {
+			return 0, 0, err
+		}
+		return ts, string(bytes), nil
+	default:
+		return 0, 0, fmt.Errorf("Unknow data type %d", it.dataType)
+	}
+}
+
 // RequestType indicates the typeof ae request.
 type RequestType uint8
 
 const (
 	Requestxxxxxxx RequestType = iota
+	RequestDumpFieldValues
 
 	RequestGetDiffData
 	RequestShardIntervalHash
@@ -339,8 +475,8 @@ func (s *Service) getDataByTime(conn net.Conn, key string, shardID uint64, start
 	//defer bw.Flush()
 	//var w io.Writer = bw
 
-	var fn func(key string, ts int64, val interface{}) error
-	fn = func(key string, ts int64, val interface{}) error {
+	var fn func(key string, ts int64, ty cnosql.DataType, val interface{}) error
+	fn = func(key string, ts int64, ty cnosql.DataType, val interface{}) error {
 		//if _, err := w.Write([]byte(fmt.Sprintf("%v", val))); err != nil {
 		//	return err
 		//}
