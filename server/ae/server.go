@@ -7,7 +7,6 @@ import (
 	"encoding/binary"
 	"encoding/gob"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"hash/fnv"
 	"io"
@@ -118,60 +117,44 @@ func (s *Service) routineLoop() {
 // serve serves ae requests from the listener.
 func (s *Service) checkShard(shardID uint64, interval int64) ([]DiffShardInfo, error) {
 	data := s.MetaClient.Data()
-	nodeAddrList := make([]string, 0)
 	start, end := data.ShardStartAndEndTime(shardID)
 	_, _, shardInfo := data.ShardDBRetentionAndInfo(shardID)
-	for _, owner := range shardInfo.Owners {
-		node := data.DataNode(owner.NodeID)
-		if node == nil {
-			return nil, fmt.Errorf("can't find node %d", owner.NodeID)
-		}
-		nodeAddrList = append(nodeAddrList, node.TCPHost)
+	if len(shardInfo.Owners) < 2 {
+		return nil, nil
 	}
 
-	if len(nodeAddrList) < 2 {
+	if end > int64(time.Now().Nanosecond())-int64(5*60*time.Nanosecond) {
+		end = int64(time.Now().Nanosecond()) - int64(5*60*time.Nanosecond)
+	}
+
+	if start >= end {
 		return nil, nil
 	}
 
 	hashs := make([]map[string][]FieldRangeDigest, 0)
-	for _, addr := range nodeAddrList {
-		conn, err := network.Dial("tcp", addr, MuxHeader)
-		if err != nil {
-			return nil, err
-		}
-		defer conn.Close()
-
-		request := &ShardDigestRequest{
-			Type:     RequestShardDigests,
-			ShardID:  shardID,
-			Interval: interval,
+	for _, owner := range shardInfo.Owners {
+		node := data.DataNode(owner.NodeID)
+		if node == nil {
+			return nil, fmt.Errorf("can't find node(%d) address", owner.NodeID)
 		}
 
-		_, err = conn.Write([]byte{byte(request.Type)})
-		if err != nil {
-			return nil, err
+		if node.ID == s.Node.ID {
+			digest, err := s.computeShardDigest(shardID, start, end, interval)
+			if err != nil {
+				return nil, err
+			}
+			hashs = append(hashs, digest)
+		} else {
+			digest, err := s.requestShardDigest(shardID, start, end, interval, node.TCPHost)
+			if err != nil {
+				return nil, err
+			}
+			hashs = append(hashs, digest)
 		}
-
-		// Write the request
-		if err := json.NewEncoder(conn).Encode(request); err != nil {
-			return nil, fmt.Errorf("encode snapshot request: %s", err)
-		}
-
-		var resp ShardDigestResponse
-		// Read the response
-		if err := gob.NewDecoder(conn).Decode(&resp); err != nil {
-			return nil, err
-		}
-
-		hashs = append(hashs, resp.Hash)
 	}
+
 	fmt.Printf("hashs:")
 	fmt.Println(hashs)
-
-	//validate the hash values, find out the diff, add the time duration into result
-	if len(hashs) == 0 {
-		return nil, errors.New("the ShardDigest what it got in all nodes are nil ")
-	}
 
 	result, err := getDiffDataInfo(hashs, start, end, interval, shardID)
 	if err != nil {
@@ -282,7 +265,7 @@ func (s *Service) handleConn(conn net.Conn) error {
 	}
 }
 
-func (s *Service) shardDigest(shardId uint64, start, end, interval int64, addr string) (map[string][]FieldRangeDigest, error) {
+func (s *Service) requestShardDigest(shardId uint64, start, end, interval int64, addr string) (map[string][]FieldRangeDigest, error) {
 	conn, err := network.Dial("tcp", addr, MuxHeader)
 	if err != nil {
 		return nil, err
