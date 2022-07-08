@@ -179,7 +179,7 @@ func getDiffDataInfo(hashs []map[string][]FieldRangeDigest, start, end, interval
 	for _, node := range hashs {
 		for field, values := range node {
 			for _, value := range values {
-				key := fmt.Sprintf("%s-%s-%s-%s", value.StartTime, value.EndTime, value.Digest, field)
+				key := fmt.Sprintf("%d-%d-%d-%s", value.StartTime, value.EndTime, value.Digest, field)
 				count[key]++
 			}
 		}
