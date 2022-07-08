@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/cnosdb/cnosdb/server/ae"
 	"io/ioutil"
 	"net/http"
 	"strconv"
@@ -206,6 +207,60 @@ func GetKillCopyShardCommand() *cobra.Command {
 
 			if err := json.NewEncoder(conn).Encode(request); err != nil {
 				return fmt.Errorf("encode snapshot request: %s", err)
+			}
+
+			bytes, _ := ioutil.ReadAll(conn)
+
+			fmt.Printf("%s\n", string(bytes))
+			return nil
+		},
+	}
+}
+
+func GetRepairShardCommand() *cobra.Command {
+	return &cobra.Command{
+		Use:     "repair-shard",
+		Short:   "repair shard",
+		Long:    "repair shard",
+		Example: "  cnosdb-ctl --bind 127.0.0.1:8091 repair-shard ShardID",
+		PreRunE: func(cmd *cobra.Command, args []string) error {
+			if len(args) != 1 {
+				return errors.New("input parameters count not right, MUST be 1")
+			}
+			return nil
+		},
+		RunE: func(cmd *cobra.Command, args []string) error {
+			shardID, err := strconv.ParseUint(args[0], 10, 64)
+			if err != nil {
+				return err
+			}
+
+			request := &ae.RepairShardRequest{
+				Type:    ae.RequestRepairShard,
+				ShardID: shardID,
+			}
+			infos, err := getDataNodesInfo(options.Env.Bind)
+			if err != nil {
+				return err
+			}
+			if len(infos) == 0 {
+				return fmt.Errorf("data nodes is empty")
+			}
+
+			//fmt.Println(infos[0])
+			conn, err := network.Dial("tcp", infos[0].TCPHost, ae.MuxHeader)
+			if err != nil {
+				return err
+			}
+			defer conn.Close()
+
+			_, err = conn.Write([]byte{byte(request.Type)})
+			if err != nil {
+				return err
+			}
+
+			if err := json.NewEncoder(conn).Encode(request); err != nil {
+				return fmt.Errorf("encode ae request: %s", err)
 			}
 
 			bytes, _ := ioutil.ReadAll(conn)
