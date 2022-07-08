@@ -17,9 +17,8 @@ import (
 	"sync"
 	"time"
 
-	"github.com/cnosdb/cnosdb/pkg/network"
-
 	"github.com/cnosdb/cnosdb/meta"
+	"github.com/cnosdb/cnosdb/pkg/network"
 	"github.com/cnosdb/cnosdb/vend/cnosql"
 	"github.com/cnosdb/cnosdb/vend/db/models"
 	"github.com/cnosdb/cnosdb/vend/db/tsdb"
