@@ -7,7 +7,6 @@ import (
 	"encoding/binary"
 	"encoding/gob"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"hash/fnv"
 	"io"
@@ -18,9 +17,8 @@ import (
 	"sync"
 	"time"
 
-	"github.com/cnosdb/cnosdb/pkg/network"
-
 	"github.com/cnosdb/cnosdb/meta"
+	"github.com/cnosdb/cnosdb/pkg/network"
 	"github.com/cnosdb/cnosdb/vend/cnosql"
 	"github.com/cnosdb/cnosdb/vend/db/models"
 	"github.com/cnosdb/cnosdb/vend/db/tsdb"
@@ -120,61 +118,49 @@ func (s *Service) routineLoop() {
 // serve serves ae requests from the listener.
 func (s *Service) checkShard(shardID uint64, interval int64) ([]DiffShardInfo, error) {
 	data := s.MetaClient.Data()
-	nodeAddrList := make([]string, 0)
 	start, end := data.ShardStartAndEndTime(shardID)
 	_, _, shardInfo := data.ShardDBRetentionAndInfo(shardID)
-	for _, owner := range shardInfo.Owners {
-		node := data.DataNode(owner.NodeID)
-		if node == nil {
-			return nil, fmt.Errorf("can't find node %d", owner.NodeID)
-		}
-		nodeAddrList = append(nodeAddrList, node.TCPHost)
+	if len(shardInfo.Owners) < 2 {
+		return nil, nil
 	}
 
-	if len(nodeAddrList) < 2 {
+	if end > int64(time.Now().Nanosecond())-int64(5*60*time.Nanosecond) {
+		end = int64(time.Now().Nanosecond()) - int64(5*60*time.Nanosecond)
+	}
+
+	if start >= end {
 		return nil, nil
 	}
 
 	hashs := make([]map[string][]FieldRangeDigest, 0)
-	for _, addr := range nodeAddrList {
-		conn, err := network.Dial("tcp", addr, MuxHeader)
-		if err != nil {
-			return nil, err
-		}
-		defer conn.Close()
-
-		request := &ShardDigestRequest{
-			Type:     RequestShardDigests,
-			ShardID:  shardID,
-			Interval: interval,
+	for _, owner := range shardInfo.Owners {
+		node := data.DataNode(owner.NodeID)
+		if node == nil {
+			return nil, fmt.Errorf("can't find node(%d) address", owner.NodeID)
 		}
 
-		_, err = conn.Write([]byte{byte(request.Type)})
-		if err != nil {
-			return nil, err
+		if node.ID == s.Node.ID {
+			digest, err := s.computeShardDigest(shardID, start, end, interval)
+			if err != nil {
+				return nil, err
+			}
+			hashs = append(hashs, digest)
+		} else {
+			digest, err := s.requestShardDigest(shardID, start, end, interval, node.TCPHost)
+			if err != nil {
+				return nil, err
+			}
+			hashs = append(hashs, digest)
 		}
-
-		// Write the request
-		if err := json.NewEncoder(conn).Encode(request); err != nil {
-			return nil, fmt.Errorf("encode snapshot request: %s", err)
-		}
-
-		var resp ShardDigestResponse
-		// Read the response
-		if err := gob.NewDecoder(conn).Decode(&resp); err != nil {
-			return nil, err
-		}
-
 	}
+
 	fmt.Printf("hashs:")
 	fmt.Println(hashs)
 
-	//validate the hash values, find out the diff, add the time duration into result
-	if len(hashs) == 0 {
-		return nil, errors.New("the ShardDigest what it got in all nodes are nil ")
+	result, err := getDiffDataInfo(hashs, start, end, interval, shardID)
+	if err != nil {
+		return nil, err
 	}
-
-	result := getDiffDataInfo(hashs, start, end, interval, shardID)
 
 	fmt.Printf("result")
 	fmt.Println(result)
@@ -182,66 +168,50 @@ func (s *Service) checkShard(shardID uint64, interval int64) ([]DiffShardInfo, e
 	return result, nil
 }
 
-func getDiffDataInfo(hashs []map[string][]FieldRangeDigest, start, end, interval int64, shardID uint64) []DiffShardInfo {
+func getDiffDataInfo(hashs []map[string][]FieldRangeDigest, start, end, interval int64, shardID uint64) ([]DiffShardInfo, error) {
 	// start, end
-	//aa
 	res := make([]DiffShardInfo, 0)
 	nodeCount := len(hashs)
-	fieldMap := make(map[string]int)
+
+	// key: start-end-hash-field
+	// value: count
+	count := make(map[string]int)
 	for _, node := range hashs {
-		for key, _ := range node {
-			fieldMap[key]++
-		}
-	}
-	// count, hash. isWrong
-	record := make(map[string][][]uint64, len(fieldMap))
-	for field, _ := range fieldMap {
-		record[field] = make([][]uint64, (end-start+interval-1)/interval)
-		for i := 0; i < len(record[field]); i++ {
-			record[field][i] = []uint64{0, 0, 0}
-		}
-		for j := 0; j < nodeCount; j++ {
-			for k := 0; k < len(hashs[j][field]); k++ {
-				idx := (hashs[j][field][k].StartTime - start) / interval
-				if _, ok := hashs[j][field]; !ok {
-					//if res[field] == nil {
-					//	res[field] = make([][]int64, 0)
-					//}
-					//res[field] = append(res[field], []int64{startTime, endTime})
-					record[field][idx][2] = 1
-					break
-				}
-				if hashs[j][field][idx].StartTime == (start + idx*interval) {
-					if record[field][idx][2] == 1 || (record[field][idx][1] != 0 && record[field][idx][1] != hashs[j][field][idx].Digest) {
-						record[field][idx][2] = 1
-						break
-					}
-					record[field][idx][0]++
-					record[field][idx][1] = hashs[j][field][idx].Digest
-				}
+		for field, values := range node {
+			for _, value := range values {
+				key := fmt.Sprintf("%s-%s-%s-%s", value.StartTime, value.EndTime, value.Digest, field)
+				count[key]++
 			}
 		}
 	}
-
-	for field, values := range record {
-		for i := 0; i < len(values); i++ {
-			if record[field][i][2] == 1 {
-				startTime := start + int64(i)*interval
-				endTime := startTime + interval
-				if endTime > end {
-					endTime = end
-				}
-				res = append(res, DiffShardInfo{
-					shardID: shardID,
-					key:     field,
-					start:   startTime,
-					end:     endTime,
-				})
-			}
+	//it's used to distinct
+	rdMap := make(map[string]bool)
+	for key, value := range count {
+		if value != nodeCount {
+			ss := strings.Split(key, "-")
+			rdMap[fmt.Sprintf("%s-%s-%s", ss[0], ss[1], ss[3])] = true
 		}
 	}
+	for key, _ := range rdMap {
+		ss := strings.Split(key, "-")
+		start, err := strconv.ParseInt(ss[0], 10, 64)
+		if err != nil {
+			return nil, err
+		}
+		end, _ := strconv.ParseInt(ss[1], 10, 64)
+		if err != nil {
+			return nil, err
+		}
+		field := ss[2]
+		res = append(res, DiffShardInfo{
+			shardID: shardID,
+			start:   start,
+			end:     end,
+			key:     field,
+		})
+	}
 
-	return res
+	return res, nil
 }
 
 // serve serves snapshot requests from the listener.
@@ -285,6 +255,9 @@ func (s *Service) handleConn(conn net.Conn) error {
 	case RequestDumpFieldValues:
 		return s.processDumpFieldValues(conn)
 
+	case RequestRepairShard:
+		return s.ProcessRepairShard(conn)
+
 	case RequestShardDigests:
 		return s.processShardDigests(conn)
 
@@ -293,7 +266,7 @@ func (s *Service) handleConn(conn net.Conn) error {
 	}
 }
 
-func (s *Service) shardDigest(shardId uint64, start, end, interval int64, addr string) (map[string][]FieldRangeDigest, error) {
+func (s *Service) requestShardDigest(shardId uint64, start, end, interval int64, addr string) (map[string][]FieldRangeDigest, error) {
 	conn, err := network.Dial("tcp", addr, MuxHeader)
 	if err != nil {
 		return nil, err
@@ -405,6 +378,26 @@ func (s *Service) dumpFieldValuesReq(key string, shardId uint64,
 	dataType := cnosql.DataType(dataByte)
 
 	return &FieldValueIterator{reader: buf, dataType: dataType}, dataType, nil
+}
+
+func (s *Service) ProcessRepairShard(conn net.Conn) error {
+	var r RepairShardRequest
+	d := json.NewDecoder(conn)
+
+	if err := d.Decode(&r); err != nil {
+		return err
+	}
+
+	localAddr := s.Listener.Addr().String()
+	s.Logger.Info("repair shard command ",
+		zap.String("Local", localAddr),
+		zap.Uint64("ShardID", r.ShardID))
+
+	s.inspection(r.ShardID)
+
+	io.WriteString(conn, "Repair Shard Succeeded")
+
+	return nil
 }
 
 func (s *Service) processDumpFieldValues(conn net.Conn) error {
@@ -700,7 +693,7 @@ const (
 	Requestxxxxxxx RequestType = iota
 	RequestDumpFieldValues
 
-	RequestGetDiffData
+	RequestRepairShard
 	RequestShardDigests
 )
 
@@ -709,6 +702,11 @@ type DiffShardInfo struct {
 	start   int64
 	end     int64
 	shardID uint64
+}
+
+type RepairShardRequest struct {
+	Type    RequestType
+	ShardID uint64
 }
 
 type FieldRangeDigest struct {

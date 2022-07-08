@@ -3103,23 +3103,24 @@ func (e *Engine) ScanFiledValue(key string, start, end int64, fn tsdb.ScanFiledF
 	}
 
 	if key != "" {
-		seriesKey, field := SeriesAndFieldFromCompositeKey([]byte(key))
-		if field == nil {
-			return fmt.Errorf("field is empty %s", key)
+		strs := strings.Split(key, " ")
+		if len(strs) != 2 {
+			return fmt.Errorf("dump key format is wrong %s", key)
 		}
 
-		sep := bytes.Index(seriesKey, []byte(","))
+		seriesKey, field := strs[0], strs[1]
+		sep := strings.Index(seriesKey, ",")
 		if sep == -1 {
 			return fmt.Errorf("can't find measurement name %s", key)
 		}
 
-		measurementFields := e.fieldset.Fields(seriesKey[:sep])
+		measurementFields := e.fieldset.FieldsByString(seriesKey[:sep])
 		if measurementFields == nil {
 			return nil
 		}
 
 		dataType := measurementFields.FieldSet()
-		if err := e.iteratorField(string(seriesKey), string(field), dataType[string(field)], options, fn); err != nil {
+		if err := e.iteratorField(seriesKey, field, dataType[field], options, fn); err != nil {
 			return err
 		}
 
@@ -3161,7 +3162,7 @@ func (e *Engine) ScanFiledValue(key string, start, end int64, fn tsdb.ScanFiledF
 }
 
 func (e *Engine) iteratorField(seriesKey, field string, dataType cnosql.DataType, options query.IteratorOptions, fn tsdb.ScanFiledFunc) error {
-	key := SeriesFieldKey(seriesKey, field)
+	key := seriesKey + " " + field
 
 	switch dataType {
 	case cnosql.Float:
