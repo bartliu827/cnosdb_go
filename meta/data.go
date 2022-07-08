@@ -3,7 +3,6 @@ package meta
 import (
 	"errors"
 	"fmt"
-	errors2 "github.com/cnosdb/cnosdb/pkg/errors"
 	"net"
 	"net/url"
 	"sort"
@@ -11,6 +10,8 @@ import (
 	"sync"
 	"time"
 	"unicode"
+
+	errors2 "github.com/cnosdb/cnosdb/pkg/errors"
 
 	internal "github.com/cnosdb/cnosdb/meta/internal"
 	"github.com/cnosdb/cnosdb/vend/cnosql"
@@ -628,6 +629,23 @@ func (data *Data) ShardDBRetentionAndInfo(id uint64) (string, string, ShardInfo)
 	}
 
 	return "", "", ShardInfo{ID: id}
+}
+
+func (data *Data) ShardStartAndEndTime(shardID uint64) (int64, int64) {
+	for dbidx, dbi := range data.Databases {
+		for rpidx, rpi := range dbi.RetentionPolicies {
+			for sgidx, rg := range rpi.ShardGroups {
+				for _, s := range rg.Shards {
+					if s.ID == shardID {
+						return data.Databases[dbidx].RetentionPolicies[rpidx].ShardGroups[sgidx].StartTime.UnixNano(),
+							data.Databases[dbidx].RetentionPolicies[rpidx].ShardGroups[sgidx].EndTime.UnixNano()
+					}
+				}
+			}
+		}
+	}
+
+	return 0, 0
 }
 
 // RemoveShardOwner remove a owner for the specified shard id.
