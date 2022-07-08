@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"hash/fnv"
 	"io"
+	"math"
 	"net"
 	"strconv"
 	"strings"
@@ -178,7 +179,7 @@ func getDiffDataInfo(hashs []map[string][]FieldRangeDigest, start, end, interval
 	for _, node := range hashs {
 		for field, values := range node {
 			for _, value := range values {
-				key := fmt.Sprintf("%s-%s-%s-%s", value.StartTime, value.EndTime, value.Digest, field)
+				key := fmt.Sprintf("%d-%d-%d-%s", value.StartTime, value.EndTime, value.Digest, field)
 				count[key]++
 			}
 		}
@@ -448,7 +449,158 @@ func (s *Service) processDumpFieldValues(conn net.Conn) error {
 func (s *Service) findInconsistentRange() {
 }
 
-func (s *Service) findLostFieldValues() {
+func (s *Service) findLostFieldValues(dsis []DiffShardInfo) (err error) {
+	/**
+	1.向各个node发送请求，拿回数据 ✔️
+	2.合并各个node的数据 ✔️
+		针对每个node，shardID，生成ts,val列表 ✔️
+	3.向node发送各自所缺少的[]models.Point ✔️
+	*/
+	data := s.MetaClient.Data()
+
+	for _, dsi := range dsis {
+		shardID := dsi.shardID
+		key := dsi.key
+		st := dsi.start
+		et := dsi.end
+
+		_, _, si := data.ShardDBRetentionAndInfo(shardID)
+		//NodeIdMapAddr{NodeID:TCPHost}
+		NodeIdMapAddr := make(map[uint64]string)
+
+		for _, owner := range si.Owners {
+			node := data.DataNode(owner.NodeID)
+			if node == nil {
+				return fmt.Errorf("can't find node %d", owner.NodeID)
+			}
+			NodeIdMapAddr[owner.NodeID] = node.TCPHost
+		}
+
+		//fvis{nodeId : *FieldValueIterator}
+		fvis := make(map[uint64]*FieldValueIterator)
+		//dts{nodeId: cnosql.DataType
+		dts := make(map[uint64]cnosql.DataType)
+		for nid, addr := range NodeIdMapAddr {
+			fvi, dT, err := s.dumpFieldValuesReq(key, shardID, st, et, addr)
+			if err != nil {
+				return err
+			}
+			fvis[nid] = fvi
+			dts[nid] = dT
+		}
+
+		//lostData{nodeId : []tsvTuple}
+		lostData := make(map[uint64][]tsvTuple)
+
+		//tmp keep ts and val for find the min ts
+		tmp := make(map[uint64]tsvTuple)
+
+		//initialize tmp
+		for nid, iter := range fvis {
+			ts, val, err := iter.Next()
+			if err != nil {
+				return err
+			}
+			tmp[nid] = tsvTuple{ts, val}
+		}
+		for {
+			//find the min ts
+			mints := int64(math.MaxInt64)
+			for _, v := range tmp {
+				if v.ts != tsdb.EOF && mints > v.ts {
+					mints = v.ts
+				}
+			}
+			if mints == int64(math.MaxInt64) {
+				break
+			}
+			for nid, v := range tmp {
+				if v.ts == tsdb.EOF {
+					continue
+				}
+				if v.ts == mints {
+					//not lost, go next
+					ts, val, err := fvis[nid].Next()
+					if err != nil {
+						return err
+					}
+					tmp[nid] = tsvTuple{ts, val}
+				} else {
+					//lost,add to LostData
+					lostData[nid] = append(lostData[nid], tsvTuple{v.ts, v.val})
+					if len(lostData[nid]) >= 500 {
+						//send the lost data to node
+						err := s.sendLostData(shardID, nid, key, lostData[nid], dts[nid])
+						if err != nil {
+							return err
+						}
+						lostData[nid] = make([]tsvTuple, 0)
+					}
+				}
+			}
+
+		}
+		//send all data finally
+		for nid, v := range lostData {
+			err := s.sendLostData(shardID, nid, key, v, dts[nid])
+			if err != nil {
+				return err
+			}
+		}
+	}
+
+	return err
+}
+
+func (s *Service) sendLostData(shardID, NodeID uint64, key string, lostData []tsvTuple, dataType cnosql.DataType) (err error) {
+	//air,host=h1,station=XiaoMaiDao#~#visibility
+	key += "="
+	var buf strings.Builder
+	for _, tsv := range lostData {
+		val, _ := interface2String(tsv.val, dataType)
+		buf.WriteString(key)
+		buf.WriteString(val)
+		buf.WriteString(" ")
+		buf.WriteString(strconv.FormatInt(tsv.ts, 10))
+		buf.WriteString("\n")
+	}
+
+	points, err := models.ParsePoints([]byte(buf.String()))
+	if err != nil {
+		return err
+	}
+	if points != nil {
+		err := s.WriteShard(shardID, NodeID, points)
+		if err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func interface2String(value interface{}, dataType cnosql.DataType) (string, error) {
+	switch dataType {
+	case cnosql.Boolean:
+		val := value.(bool)
+		return strconv.FormatBool(val), nil
+	case cnosql.Integer:
+		var val int64
+		val = value.(int64)
+		return strconv.FormatInt(val, 10), nil
+	case cnosql.Unsigned:
+		var val uint64
+		val = value.(uint64)
+		return strconv.FormatUint(val, 10), nil
+	case cnosql.Float:
+		var val float64
+		val = value.(float64)
+		return strconv.FormatFloat(val, 'E', -1, 64), nil
+	case cnosql.String:
+		return value.(string), nil
+	default:
+		return "", fmt.Errorf("Unknow data type %d", dataType)
+	}
+
 }
 
 func (s *Service) WriteShard(shardID, ownerID uint64, points []models.Point) error {
@@ -584,4 +736,15 @@ type DumpFieldValuesRequest struct {
 }
 
 type DumpFieldValuesResponse struct {
+}
+
+type NodeShardLostPoints struct {
+	ownerID uint64
+	shardID uint64
+	points  []models.Point
+}
+
+type tsvTuple struct {
+	ts  int64
+	val interface{}
 }
