@@ -11,7 +11,9 @@ import (
 	"fmt"
 	"hash/fnv"
 	"io"
+	"math"
 	"net"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -346,7 +348,7 @@ func (s *Service) computeShardDigest(shardID uint64, startTime, endTime, interva
 		err := s.TSDBStore.ScanFiledValue(shardID, "", start, end, func(key string, ts int64, dt cnosql.DataType, val interface{}) error {
 			if ts != tsdb.EOF {
 				valcount += 1
-				new64Hash.Write(Slice(fmt.Sprintf("%d:%v", ts, val)))
+				new64Hash.Write([]byte(fmt.Sprintf("%d:%v", ts, val)))
 			}
 
 			if ts == tsdb.EOF && valcount > 0 {
@@ -454,73 +456,158 @@ func (s *Service) processDumpFieldValues(conn net.Conn) error {
 func (s *Service) findInconsistentRange() {
 }
 
-func (s *Service) findLostFieldValues(dsis []DiffShardInfo) (result []NodeShardLostPoints) {
-	//1.向各个node发送请求，拿回数据 ✅
-	//2.合并各个node的数据
-	//3.对于每个node，返回它所缺少的[]models.Point
+func (s *Service) findLostFieldValues(dsis []DiffShardInfo) (err error) {
+	/**
+	1.向各个node发送请求，拿回数据 ✔️
+	2.合并各个node的数据 ✔️
+		针对每个node，shardID，生成ts,val列表 ✔️
+	3.向node发送各自所缺少的[]models.Point ✔️
+	*/
 	data := s.MetaClient.Data()
 
 	for _, dsi := range dsis {
 		shardID := dsi.shardID
+		key := dsi.key
+		st := dsi.start
+		et := dsi.end
+
 		_, _, si := data.ShardDBRetentionAndInfo(shardID)
-		nodeList := make([]uint64, 0)
-		//get NodeIDs
+		//NodeIdMapAddr{NodeID:TCPHost}
+		NodeIdMapAddr := make(map[uint64]string)
+
 		for _, owner := range si.Owners {
-			nodeList = append(nodeList, owner.NodeID)
-		}
-		//get node_address
-		addr2nid := make(map[string]uint64)
-		nodeAddrList := make([]string, 0)
-		for _, nid := range nodeList {
-			tcpHost := data.DataNode(nid).TCPHost
-			nodeAddrList = append(nodeAddrList, tcpHost)
-			addr2nid[tcpHost] = nid
+			node := data.DataNode(owner.NodeID)
+			if node == nil {
+				return fmt.Errorf("can't find node %d", owner.NodeID)
+			}
+			NodeIdMapAddr[owner.NodeID] = node.TCPHost
 		}
 
-		var fvis []*FieldValueIterator
-
-		for _, addr := range nodeAddrList {
-			fvi, _, err := s.dumpFieldValuesReq(dsi.key, dsi.shardID, dsi.start, dsi.end, addr)
+		//fvis{nodeId : *FieldValueIterator}
+		fvis := make(map[uint64]*FieldValueIterator)
+		//dts{nodeId: cnosql.DataType
+		dts := make(map[uint64]cnosql.DataType)
+		for nid, addr := range NodeIdMapAddr {
+			fvi, dT, err := s.dumpFieldValuesReq(key, shardID, st, et, addr)
 			if err != nil {
-				return nil
+				return err
 			}
-
-			fvis = append(fvis, fvi)
+			fvis[nid] = fvi
+			dts[nid] = dT
 		}
-		//init heap
-		arr := make([]int64, len(fvis))
-		for idx, iter := range fvis {
-			ts, _, err2 := iter.Next()
-			arr[idx] = ts
-			if err2 != nil {
-				return nil
+
+		//lostData{nodeId : []tsvTuple}
+		lostData := make(map[uint64][]tsvTuple)
+
+		//tmp keep ts and val for find the min ts
+		tmp := make(map[uint64]tsvTuple)
+
+		//initialize tmp
+		for nid, iter := range fvis {
+			ts, val, err := iter.Next()
+			if err != nil {
+				return err
 			}
+			tmp[nid] = tsvTuple{ts, val}
 		}
 		for {
-			mints := tsdb.EOF
-			for idx, _ := range arr {
-				if arr[idx] == tsdb.EOF {
-					continue
-				}
-				if arr[idx] == mints {
-					ts, val, err := fvis[idx].Next()
-					if err != nil {
-						return nil
-					}
-					arr[idx] = ts
-				} else {
-					//不相同,添加到[]
-
+			//find the min ts
+			mints := int64(math.MaxInt64)
+			for _, v := range tmp {
+				if v.ts != tsdb.EOF && mints > v.ts {
+					mints = v.ts
 				}
 			}
-			if mints == -1 {
+			if mints == int64(math.MaxInt64) {
 				break
 			}
-		}
+			for nid, v := range tmp {
+				if v.ts == tsdb.EOF {
+					continue
+				}
+				if v.ts == mints {
+					//not lost, go next
+					ts, val, err := fvis[nid].Next()
+					if err != nil {
+						return err
+					}
+					tmp[nid] = tsvTuple{ts, val}
+				} else {
+					//lost,add to LostData
+					lostData[nid] = append(lostData[nid], tsvTuple{v.ts, v.val})
+					if len(lostData[nid]) >= 500 {
+						//send the lost data to node
+						err := s.sendLostData(shardID, nid, key, lostData[nid], dts[nid])
+						if err != nil {
+							return err
+						}
+						lostData[nid] = make([]tsvTuple, 0)
+					}
+				}
+			}
 
+		}
+		//send all data finally
+		for nid, v := range lostData {
+			err := s.sendLostData(shardID, nid, key, v, dts[nid])
+			if err != nil {
+				return err
+			}
+		}
 	}
 
+	return err
+}
+
+func (s *Service) sendLostData(shardID, NodeID uint64, key string, lostData []tsvTuple, dataType cnosql.DataType) (err error) {
+	//air,host=h1,station=XiaoMaiDao#~#visibility
+	key += "="
+	var buf strings.Builder
+	for _, tsv := range lostData {
+		val, _ := interface2String(tsv.val, dataType)
+		buf.WriteString(key)
+		buf.WriteString(val)
+		buf.WriteString(" ")
+		buf.WriteString(strconv.FormatInt(tsv.ts, 10))
+		buf.WriteString("\n")
+	}
+
+	points, err := models.ParsePoints([]byte(buf.String()))
+	if err != nil {
+		return err
+	}
+	if points != nil {
+		err := s.WriteShard(shardID, NodeID, points)
+		if err != nil {
+			return err
+		}
+	}
 	return nil
+}
+
+func interface2String(value interface{}, dataType cnosql.DataType) (string, error) {
+	switch dataType {
+	case cnosql.Boolean:
+		val := value.(bool)
+		return strconv.FormatBool(val), nil
+	case cnosql.Integer:
+		var val int64
+		val = value.(int64)
+		return strconv.FormatInt(val, 10), nil
+	case cnosql.Unsigned:
+		var val uint64
+		val = value.(uint64)
+		return strconv.FormatUint(val, 10), nil
+	case cnosql.Float:
+		var val float64
+		val = value.(float64)
+		return strconv.FormatFloat(val, 'E', -1, 64), nil
+	case cnosql.String:
+		return value.(string), nil
+	default:
+		return "", fmt.Errorf("Unknow data type %d", dataType)
+	}
+
 }
 
 func (s *Service) WriteShard(shardID, ownerID uint64, points []models.Point) error {
@@ -654,7 +741,12 @@ type DumpFieldValuesResponse struct {
 }
 
 type NodeShardLostPoints struct {
-	shardID uint64
 	ownerID uint64
+	shardID uint64
 	points  []models.Point
+}
+
+type tsvTuple struct {
+	ts  int64
+	val interface{}
 }
