@@ -338,7 +338,7 @@ func (s *Service) computeShardDigest(shardID uint64, startTime, endTime, interva
 		err := s.TSDBStore.ScanFiledValue(shardID, "", start, end, func(key string, ts int64, dt cnosql.DataType, val interface{}) error {
 			if ts != tsdb.EOF {
 				valcount += 1
-				new64Hash.Write(Slice(fmt.Sprintf("%d:%v", ts, val)))
+				new64Hash.Write([]byte(fmt.Sprintf("%d:%v", ts, val)))
 			}
 
 			if ts == tsdb.EOF && valcount > 0 {
@@ -410,15 +410,7 @@ func (s *Service) ProcessRepairShard(conn net.Conn) error {
 		zap.String("Local", localAddr),
 		zap.Uint64("ShardID", r.ShardID))
 
-	//_, _, sg := s.MetaClient.ShardOwner(r.ShardID)
-	//start := sg.StartTime.UnixNano()
-	//end := sg.EndTime.UnixNano()
-
-	//s.shardDigest(r.ShardID, start, end, )
-	//findInconsistentRange()
-	//s.dumpFieldValues()
-	//s.findLostFieldValues()
-	//s.WriteShard()
+	s.inspection(r.ShardID)
 
 	io.WriteString(conn, "Repair Shard Succeeded")
 
@@ -566,9 +558,6 @@ type RequestType uint8
 const (
 	Requestxxxxxxx RequestType = iota
 	RequestDumpFieldValues
-
-	RequestGetDiffData
-	RequestShardIntervalHash
 
 	RequestRepairShard
 	RequestShardDigests
